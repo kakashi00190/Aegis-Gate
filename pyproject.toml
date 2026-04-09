@@ -1,0 +1,11 @@
+[project]
+name = "repl-nix-workspace"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram==3.27.0",
+    "asyncpg==0.29.0",
+    "python-dotenv==1.0.1",
+    "aiohttp>=3.13.3",
+]
