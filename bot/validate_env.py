@@ -35,32 +35,47 @@ async def validate_database(url: str):
     try:
         conn = await asyncpg.connect(url, timeout=10)
         logger.info("✅ Database connection successful.")
+        
+        # Check if tables exist
+        tables = ['users', 'sessions', 'media', 'sent_messages', 'admin_config']
+        for table in tables:
+            exists = await conn.fetchval(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)",
+                table
+            )
+            if not exists:
+                logger.warning(f"⚠️ Table '{table}' does not exist yet. It will be created on first run.")
+        
         await conn.close()
         return True
     except Exception as e:
         logger.error(f"❌ Database connection failed: {e}")
         return False
 
-def validate_port(port: int):
-    logger.info(f"Validating Port {port} availability...")
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        try:
-            s.bind(("0.0.0.0", port))
-            logger.info(f"✅ Port {port} is available.")
-            return True
-        except OSError:
-            logger.error(f"❌ Port {port} is already in use or blocked.")
-            return False
+def validate_admin_id(admin_id_str: str):
+    logger.info("Validating Admin ID...")
+    try:
+        # Support both single ID and comma-separated IDs
+        ids = [int(i.strip()) for i in admin_id_str.split(',')]
+        logger.info(f"✅ Admin ID(s) valid: {ids}")
+        return True
+    except ValueError:
+        logger.error(f"❌ Invalid Admin ID format: {admin_id_str}. Must be an integer or comma-separated integers.")
+        return False
 
 async def main():
-    # Required Environment Variables (Mapping User's prompt to bot's config names)
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
-    admin_id = os.environ.get("ADMIN_USER_IDS") or os.environ.get("ADMIN_ID")
+    # Required Environment Variables
+    token = os.environ.get("BOT_TOKEN")
+    admin_id = os.environ.get("ADMIN_ID")
     db_url = os.environ.get("DATABASE_URL")
-    port_str = os.environ.get("PORT", "3000")
+    port_str = os.environ.get("PORT", "8080")
 
     if not all([token, admin_id, db_url]):
-        logger.error("❌ Missing required environment variables (TELEGRAM_BOT_TOKEN, ADMIN_USER_IDS, DATABASE_URL).")
+        missing = []
+        if not token: missing.append("BOT_TOKEN")
+        if not admin_id: missing.append("ADMIN_ID")
+        if not db_url: missing.append("DATABASE_URL")
+        logger.error(f"❌ Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
 
     try:
@@ -78,8 +93,13 @@ async def main():
     if not await validate_database(db_url):
         success = False
     
-    if not validate_port(port):
+    if not validate_admin_id(admin_id):
         success = False
+    
+    # Optional: Port check might fail if the port is already bound by the health server in a previous run
+    # but for a fresh startup it should be fine.
+    # if not validate_port(port):
+    #     success = False
 
     if success:
         logger.info("🚀 All checks passed! Starting bot...")

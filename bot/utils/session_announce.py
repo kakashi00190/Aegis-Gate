@@ -57,7 +57,10 @@ async def broadcast_session_end(bot: Bot, pool: asyncpg.Pool, result: dict, paus
 
 
 async def broadcast_new_session_started(bot: Bot, pool: asyncpg.Pool, new_session):
-    session_num = new_session['session_number'] if hasattr(new_session, '__getitem__') else new_session.get('session_number', '?')
+    try:
+        session_num = new_session['session_number']
+    except (TypeError, KeyError, IndexError):
+        session_num = '?'
 
     config = await get_config(pool)
     activation_threshold = int(config.get('activation_threshold', '10'))

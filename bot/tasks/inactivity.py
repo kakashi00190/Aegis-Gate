@@ -7,11 +7,14 @@ from aiogram.exceptions import TelegramForbiddenError
 import asyncpg
 from database import get_config, get_inactive_users, mark_user_blocked, is_session_paused
 
+from utils.health import health_monitor
+
 logger = logging.getLogger(__name__)
 
 
 async def check_inactivity(bot: Bot, pool: asyncpg.Pool):
     while True:
+        health_monitor.update("inactivity_check")
         await asyncio.sleep(60)
         try:
             paused, _ = await is_session_paused(pool)

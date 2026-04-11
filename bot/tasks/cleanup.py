@@ -11,6 +11,8 @@ from database import (
     get_all_sent_messages_batch
 )
 
+from utils.health import health_monitor
+
 logger = logging.getLogger(__name__)
 
 CLEANUP_CONCURRENCY = 8
@@ -89,14 +91,26 @@ async def delete_session_messages(bot: Bot, pool: asyncpg.Pool, session_id: int)
     initial_bar = generate_progress_bar(0)
     for user in users:
         try:
-            msg = await bot.send_message(
-                user['id'],
-                f"🧹 <b>Wiping session media...</b>\n\n"
-                f"⏳ Progress: 0/{total_messages} (0%)\n"
-                f"<code>{initial_bar}</code>",
-                parse_mode="HTML"
-            )
-            progress_msgs[user['id']] = msg
+            # ONLY send real-time progress to the Admin to avoid rate limits
+            from config import ADMIN_ID
+            if user['id'] == ADMIN_ID:
+                msg = await bot.send_message(
+                    user['id'],
+                    f"🧹 <b>Wiping session media...</b>\n\n"
+                    f"⏳ Progress: 0/{total_messages} (0%)\n"
+                    f"<code>{initial_bar}</code>",
+                    parse_mode="HTML"
+                )
+                progress_msgs[user['id']] = msg
+            else:
+                # Other users just get a one-time message
+                await bot.send_message(
+                    user['id'],
+                    f"🧹 <b>Wiping session media...</b>\n\n"
+                    "Please wait while all media from the previous session is being cleared.\n"
+                    "Uploads will resume shortly.",
+                    parse_mode="HTML"
+                )
         except TelegramForbiddenError:
             await mark_user_blocked(pool, user['id'])
         except Exception:
@@ -236,15 +250,26 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
 
     for user in users:
         try:
-            msg = await bot.send_message(
-                user['id'],
-                f"🚨 <b>EMERGENCY MEDIA WIPE</b>\n\n"
-                f"⏳ Progress: 0/{total_messages} (0%)\n"
-                f"[░░░░░░░░░░]\n\n"
-                f"⚠️ All media is being deleted by admin.",
-                parse_mode="HTML"
-            )
-            progress_msgs[user['id']] = msg
+            # ONLY send real-time progress to the Admin to avoid rate limits
+            from config import ADMIN_ID
+            if user['id'] == ADMIN_ID:
+                msg = await bot.send_message(
+                    user['id'],
+                    f"🚨 <b>EMERGENCY MEDIA WIPE</b>\n\n"
+                    f"⏳ Progress: 0/{total_messages} (0%)\n"
+                    f"[░░░░░░░░░░]\n\n"
+                    f"⚠️ All media is being deleted by admin.",
+                    parse_mode="HTML"
+                )
+                progress_msgs[user['id']] = msg
+            else:
+                # Other users just get a one-time message
+                await bot.send_message(
+                    user['id'],
+                    "🚨 <b>EMERGENCY MEDIA WIPE</b>\n\n"
+                    "Admin has initiated a full media wipe. Please wait.",
+                    parse_mode="HTML"
+                )
         except TelegramForbiddenError:
             await mark_user_blocked(pool, user['id'])
         except Exception:
@@ -356,6 +381,7 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
 async def cleanup_stale_verifications_task(pool: asyncpg.Pool):
     """Background task to remove pending verifications older than 15 minutes."""
     while True:
+        health_monitor.update("stale_verifications_cleanup")
         await asyncio.sleep(300) # Run every 5 minutes
         try:
             async with pool.acquire() as conn:

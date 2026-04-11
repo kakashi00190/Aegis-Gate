@@ -41,6 +41,8 @@ _active_users_cache = {
 }
 CACHE_TTL = 30  # seconds
 
+from utils.health import health_monitor
+
 # Global queue for logging sent messages to database
 _sent_messages_queue = asyncio.Queue()
 
@@ -50,6 +52,7 @@ async def sent_messages_logger_task(pool: asyncpg.Pool):
     last_flush = time.monotonic()
     
     while True:
+        health_monitor.update("sent_messages_logger")
         try:
             # Wait for an item or timeout
             try:
@@ -232,6 +235,7 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
     last_status_log = time.monotonic()
 
     while True:
+        health_monitor.update("broadcast_queue")
         try:
             paused, _ = await is_session_paused(pool)
             if paused:

@@ -30,11 +30,30 @@ logger = logging.getLogger(__name__)
 import json
 from aiohttp import web, WSCloseCode
 
+from utils.health import TaskHealth
+
 # Global list of active websocket connections
 ws_clients = []
 
 async def health_handler(request):
+    """Basic health check for Render/Uptime monitors."""
     return web.Response(text="ok", status=200)
+
+async def detailed_health_handler(request):
+    """Detailed health check for internal monitoring."""
+    status = TaskHealth.get_status()
+    is_healthy = all(task["healthy"] for task in status.values())
+    
+    response_data = {
+        "status": "healthy" if is_healthy else "degraded",
+        "tasks": status,
+        "timestamp": time.time()
+    }
+    
+    return web.json_response(
+        response_data, 
+        status=200 if is_healthy else 503
+    )
 
 async def stats_ws_handler(request):
     ws = web.WebSocketResponse()
@@ -75,6 +94,7 @@ async def run_health_server(pool):
     app['pool'] = pool
     app.router.add_get("/api/healthz", health_handler)
     app.router.add_get("/healthz", health_handler)
+    app.router.add_get("/api/health", detailed_health_handler)
     app.router.add_get("/api/stats/ws", stats_ws_handler)
     
     runner = web.AppRunner(app)
@@ -89,7 +109,8 @@ async def run_health_server(pool):
             from database import get_advanced_stats
             last_stats = None
             while True:
-                await asyncio.sleep(5) # Broadcast every 5 seconds
+                health_monitor.update("stats_broadcast")
+                await asyncio.sleep(15) # Broadcast every 15 seconds
                 if not ws_clients:
                     continue
                 

@@ -14,11 +14,14 @@ from utils.session_announce import broadcast_session_end, broadcast_new_session_
 from utils.helpers import format_timedelta_until
 from tasks.cleanup import delete_session_messages
 
+from utils.health import health_monitor
+
 logger = logging.getLogger(__name__)
 
 
 async def check_session_end(bot: Bot, pool: asyncpg.Pool):
     while True:
+        health_monitor.update("session_check")
         await asyncio.sleep(60)
         try:
             session = await get_current_session(pool)
@@ -27,8 +30,8 @@ async def check_session_end(bot: Bot, pool: asyncpg.Pool):
 
             now = datetime.now(timezone.utc)
 
-            if session.get('ended_at'):
-                pause_until = session.get('pause_until')
+            if session['ended_at']:
+                pause_until = session['pause_until']
                 if not pause_until:
                     new_session = await create_new_session(pool)
                     logger.info(f"Created session #{new_session['session_number']} (no pause_until)")
