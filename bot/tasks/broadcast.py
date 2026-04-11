@@ -10,7 +10,8 @@ import asyncpg
 # Removed circular import of store_sent_messages_batch
 from database import (
     claim_due_broadcasts, get_all_active_users,
-    mark_user_blocked, store_sent_message, is_session_paused
+    mark_user_blocked, store_sent_message, is_session_paused,
+    unclaim_broadcast, get_config
 )
 
 logger = logging.getLogger(__name__)
@@ -185,6 +186,10 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
     total_targets = len(target_users)
 
     if not target_users:
+        # If no one to send to, unclaim these items so they stay in queue for later
+        m_ids = [item['id'] for item in media_items]
+        logger.info(f"No recipients for media from {uploader_name}. Re-queueing {len(m_ids)} items.")
+        await unclaim_broadcast(pool, m_ids)
         return
 
     start_time = time.monotonic()
@@ -219,6 +224,7 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
 
 async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
     semaphore = asyncio.Semaphore(SEND_CONCURRENCY)
+    last_status_log = time.monotonic()
 
     while True:
         try:
@@ -227,10 +233,32 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 await asyncio.sleep(5)
                 continue
 
+            # CRITICAL FIX: Check recipients BEFORE claiming broadcasts
+            # This prevents marking media as 'sent' when there's no one to receive it.
+            recipients = await get_cached_active_users(pool)
+            if not recipients:
+                now = time.monotonic()
+                if now - last_status_log > 300: # Log every 5 mins
+                    logger.info("Broadcast queue: No active recipients. Waiting...")
+                    last_status_log = now
+                # If no active users, wait longer for someone to become active
+                await asyncio.sleep(10)
+                continue
+
             raw_items = await claim_due_broadcasts(pool, limit=BATCH_SIZE)
             if not raw_items:
+                # Periodic status log even if no items
+                now = time.monotonic()
+                if now - last_status_log > 300: # Log every 5 mins
+                    config = await get_config(pool)
+                    delay = config.get('broadcast_delay_seconds', '30')
+                    logger.info(f"Broadcast queue: {len(recipients)} recipients, but no items due. (Delay: {delay}s)")
+                    last_status_log = now
                 await asyncio.sleep(1)
                 continue
+
+            logger.info(f"Claimed {len(raw_items)} media items for broadcast to {len(recipients)} potential recipients.")
+            last_status_log = time.time()
 
             # Group items by media_group_id or ID if no media_group_id
             grouped_media = {}
@@ -239,11 +267,6 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 if group_key not in grouped_media:
                     grouped_media[group_key] = []
                 grouped_media[group_key].append(dict(item))
-
-            recipients = await get_cached_active_users(pool)
-            if not recipients:
-                await asyncio.sleep(2)
-                continue
 
             tasks = [
                 broadcast_item(bot, pool, items, recipients, semaphore)

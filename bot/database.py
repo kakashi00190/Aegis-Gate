@@ -581,6 +581,18 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
         )
 
 
+async def unclaim_broadcast(pool: asyncpg.Pool, media_ids: List[int], delay_seconds: int = 30):
+    """Marks media items as not sent and schedules them for a later time."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE media SET 
+               sent_at = NULL, 
+               scheduled_at = NOW() + make_interval(secs => $1)
+               WHERE id = ANY($2)""",
+            delay_seconds, media_ids
+        )
+
+
 async def get_inactive_users(pool: asyncpg.Pool, cutoff: datetime) -> List[asyncpg.Record]:
     async with pool.acquire() as conn:
         return await conn.fetch(
