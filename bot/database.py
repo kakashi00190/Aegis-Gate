@@ -54,7 +54,7 @@ ALTER TABLE media ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE;
 
 DROP INDEX IF EXISTS idx_media_queue;
 CREATE INDEX IF NOT EXISTS idx_media_queue ON media(scheduled_at)
-    WHERE sent_at IS NULL AND scheduled_at IS NOT NULL AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '5 minutes');
+    WHERE sent_at IS NULL AND scheduled_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_activity_at)
     WHERE status = 'active';
@@ -83,7 +83,12 @@ CREATE TABLE IF NOT EXISTS sent_messages (
 );
 
 ALTER TABLE sent_messages DROP CONSTRAINT IF EXISTS sent_messages_media_id_fkey;
-ALTER TABLE sent_messages ADD CONSTRAINT sent_messages_media_id_fkey FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE SET NULL;
+DO $$ 
+BEGIN 
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sent_messages_media_id_fkey') THEN
+        ALTER TABLE sent_messages ADD CONSTRAINT sent_messages_media_id_fkey FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE SET NULL;
+    END IF;
+END $$;
 
 ALTER TABLE sent_messages ADD COLUMN IF NOT EXISTS media_id INTEGER REFERENCES media(id) ON DELETE SET NULL;
 
