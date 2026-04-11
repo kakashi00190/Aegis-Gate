@@ -16,7 +16,7 @@ async def main():
         db_url = db_url.replace("postgres://", "postgresql://", 1)
 
     try:
-        conn = await asyncpg.connect(db_url)
+        conn = await asyncpg.connect(db_url, statement_cache_size=0)
         logger.info("✅ Connected to database.")
 
         # Check search_path

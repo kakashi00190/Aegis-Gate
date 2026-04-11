@@ -33,7 +33,7 @@ async def validate_database(url: str):
         url = url.replace("postgres://", "postgresql://", 1)
     
     try:
-        conn = await asyncpg.connect(url, timeout=10)
+        conn = await asyncpg.connect(url, timeout=10, statement_cache_size=0)
         logger.info("✅ Database connection successful.")
         
         # Check if tables exist
