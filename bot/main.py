@@ -12,6 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import config
+from validate_env import main as validate_environment
 from database import init_db
 from handlers import start, media, commands, admin
 from tasks.broadcast import process_broadcast_queue, sent_messages_logger_task
@@ -145,6 +146,9 @@ async def run_health_server(pool):
 
 async def main():
     logger.info("Starting Telegram Media Sharing Bot...")
+
+    # Validate environment before starting
+    await validate_environment()
 
     pool = await asyncpg.create_pool(
         config.DATABASE_URL,

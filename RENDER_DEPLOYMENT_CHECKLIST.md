@@ -10,11 +10,8 @@ Ensure the following environment variables are correctly set in the Render dashb
 - [ ] `PORT`: Set to `8080` (or another port of your choice).
 
 ## 2. Startup Command
-Use the following command to start the bot:
-```bash
-python bot/validate_env.py && python bot/main.py
-```
-This ensures the bot only starts if all environment variables are correct and the database is reachable.
+You do **not** need to manually run the validation command anymore. I have integrated it directly into the bot's startup.
+- **Default command**: `python bot/main.py` (this will automatically run the validation checks first).
 
 ## 3. Health Checks
 Configure Render's health check to monitor the following endpoint:
@@ -24,7 +21,13 @@ Configure Render's health check to monitor the following endpoint:
 
 *Note: For detailed task monitoring, use `/api/health`.*
 
-## 4. Database Optimization
+## 4. Render Free Tier Notice
+Since you are using the **Free Tier** on Render:
+- The bot will "spin down" (go to sleep) if there are no web requests for 15 minutes.
+- When it's asleep, the first Telegram message you send will take **30-50 seconds** to process while Render wakes up the bot.
+- **Recommendation**: Use a free uptime monitor (like UptimeRobot or Cron-job.org) to ping your `/api/healthz` endpoint every 10 minutes to keep the bot awake 24/7.
+
+## 5. Database Optimization
 - [ ] Ensure you are using at least a **Starter** (non-free) PostgreSQL instance if you have more than 500 users. The free tier has strict connection limits (max 50) and may cause issues during high-volume broadcasts.
 - [ ] Set `asyncpg` pool `max_size` to `50` in `bot/main.py` (already configured, but verify if you change database tiers).
 
