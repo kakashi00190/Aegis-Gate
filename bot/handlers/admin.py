@@ -612,6 +612,21 @@ async def cb_ban_user(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
         await bot.send_message(user_id, "🚫 You have been banned from this bot.")
     except Exception:
         pass
+    
+    # If the message being interacted with is a report view, update its status text
+    if callback.message.caption and "🚨 Report #" in callback.message.caption:
+        new_caption = callback.message.caption.replace("Status: 🔴 Unsolved", "Status: ✅ Solved (Banned)")
+        try:
+            await callback.message.edit_caption(caption=new_caption, parse_mode="HTML")
+        except Exception:
+            pass
+    elif callback.message.text and "🚨 Report #" in callback.message.text:
+        new_text = callback.message.text.replace("Status: 🔴 Unsolved", "Status: ✅ Solved (Banned)")
+        try:
+            await callback.message.edit_text(text=new_text, parse_mode="HTML")
+        except Exception:
+            pass
+
     await callback.answer("🚫 User banned.")
     try:
         await callback.message.edit_reply_markup(

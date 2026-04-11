@@ -533,10 +533,17 @@ async def solve_report(pool: asyncpg.Pool, report_id: int):
 
 async def ban_user(pool: asyncpg.Pool, user_id: int):
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET status = 'banned' WHERE id = $1 AND status != 'banned'",
-            user_id
-        )
+        async with conn.transaction():
+            # 1. Set status to banned
+            await conn.execute(
+                "UPDATE users SET status = 'banned' WHERE id = $1 AND status != 'banned'",
+                user_id
+            )
+            # 2. Automatically solve ALL pending reports for this uploader
+            await conn.execute(
+                "UPDATE reports SET solved = TRUE, solved_at = NOW() WHERE uploader_id = $1 AND solved = FALSE",
+                user_id
+            )
 
 
 async def unban_user(pool: asyncpg.Pool, user_id: int):
