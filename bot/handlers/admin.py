@@ -1024,7 +1024,31 @@ async def admin_do_end_session(callback: CallbackQuery, pool: asyncpg.Pool, bot:
         await callback.message.delete()
     except Exception:
         pass
-    progress_msg = await callback.message.answer("⏳ <b>Ending session and distributing badges...</b>", parse_mode="HTML")
+    
+    from tasks.cleanup import generate_progress_bar
+    
+    progress_msg = await callback.message.answer(
+        "🏆 <b>Ending Session</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ Initializing...\n"
+        f"<code>{generate_progress_bar(0)}</code> 0%",
+        parse_mode="HTML"
+    )
+
+    async def update_progress(label: str, pct: int):
+        bar = generate_progress_bar(pct)
+        try:
+            await progress_msg.edit_text(
+                f"🏆 <b>Ending Session</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n\n"
+                f"⏳ {label}\n"
+                f"<code>{bar}</code> {pct}%\n",
+                parse_mode="HTML"
+            )
+        except TelegramBadRequest:
+            pass # Message not modified or too frequent updates
+        except Exception as e:
+            logger.debug(f"Progress update error: {e}")
 
     config = await get_config(pool)
     pause_hours = float(config.get('session_pause_hours', '3'))
@@ -1039,7 +1063,9 @@ async def admin_do_end_session(callback: CallbackQuery, pool: asyncpg.Pool, bot:
         await callback.message.answer("❌ No active session found.", reply_markup=admin_main_keyboard())
         return
 
-    result = await end_session(pool, session['id'], pause_hours, top_n)
+    # Pass the progress callback to end_session
+    result = await end_session(pool, session['id'], pause_hours, top_n, progress_callback=update_progress)
+    
     if not result:
         try:
             await progress_msg.delete()
@@ -1053,7 +1079,7 @@ async def admin_do_end_session(callback: CallbackQuery, pool: asyncpg.Pool, bot:
         return
 
     try:
-        await progress_msg.edit_text("⏳ <b>Broadcasting results to users...</b>", parse_mode="HTML")
+        await update_progress("Broadcasting results to users...", 98)
     except Exception:
         pass
 
@@ -1073,7 +1099,8 @@ async def admin_do_end_session(callback: CallbackQuery, pool: asyncpg.Pool, bot:
         pass
 
     await callback.message.answer(
-        f"✅ <b>Session #{session['session_number']} ended.</b>\n\n"
+        f"✅ <b>Session #{session['session_number']} ended successfully!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
         f"• Badges assigned: <b>{badges_count}</b>\n"
         f"• All session media deleted\n"
         f"• Leaderboard reset\n"

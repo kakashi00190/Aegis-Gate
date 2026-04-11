@@ -257,8 +257,7 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
                     user['id'],
                     f"🚨 <b>EMERGENCY MEDIA WIPE</b>\n\n"
                     f"⏳ Progress: 0/{total_messages} (0%)\n"
-                    f"[░░░░░░░░░░]\n\n"
-                    f"⚠️ All media is being deleted by admin.",
+                    f"<code>{generate_progress_bar(0)}</code>",
                     parse_mode="HTML"
                 )
                 progress_msgs[user['id']] = msg

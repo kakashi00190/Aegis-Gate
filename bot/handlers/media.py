@@ -10,9 +10,13 @@ from database import (
     increment_inactive_uploads
 )
 from utils.helpers import contains_link, format_timedelta_until
+from config import ADMIN_ID
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
 
 _pause_cooldowns: dict[int, float] = {}
 _upload_cooldowns: dict[int, list[float]] = {} # user_id -> [timestamps]
@@ -27,7 +31,7 @@ def _cleanup_cooldowns(cooldowns: dict, ttl: int = COOLDOWN_TTL):
         # Handle _upload_cooldowns list format
         expired_keys = []
         for k, v in cooldowns.items():
-            cooldowns[k] = [ts for v_ts in v if now - v_ts < WINDOW_SECONDS]
+            cooldowns[k] = [v_ts for v_ts in v if now - v_ts < WINDOW_SECONDS]
             if not cooldowns[k]:
                 expired_keys.append(k)
         for k in expired_keys:
@@ -39,7 +43,10 @@ def _cleanup_cooldowns(cooldowns: dict, ttl: int = COOLDOWN_TTL):
             del cooldowns[k]
 
 
-@router.message(F.content_type.in_({'photo', 'video', 'document'}))
+@router.message(F.content_type.in_({
+    'photo', 'video', 'document', 'audio', 'voice', 
+    'animation', 'sticker', 'video_note'
+}))
 async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
     user_id = message.from_user.id
 
@@ -68,7 +75,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         return
 
     paused, pause_until = await is_session_paused(pool)
-    if paused:
+    if paused and not is_admin(user_id):
         try:
             await message.delete()
         except Exception:
@@ -85,6 +92,15 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                 f"Uploads resume in <b>{time_left}</b>.",
                 parse_mode="HTML"
             )
+        return
+
+    if message.content_type not in {'photo', 'video', 'document'}:
+        # Notify about unsupported media types (but don't delete unless paused)
+        await message.answer(
+            "⚠️ <b>Unsupported media type.</b>\n\n"
+            "Only photos, videos, and documents are shared with other users.",
+            parse_mode="HTML"
+        )
         return
 
     if message.content_type == 'photo':

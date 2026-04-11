@@ -2,9 +2,9 @@ import asyncpg
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Optional, List, Dict, Callable, Coroutine
 
 logger = logging.getLogger(__name__)
-from typing import Optional, List, Dict
 
 from utils.levels import calculate_level
 from utils.helpers import badge_for_rank
@@ -662,10 +662,14 @@ async def end_session(
     pool: asyncpg.Pool,
     session_id: int,
     pause_hours: float,
-    leaderboard_top: int
+    leaderboard_top: int,
+    progress_callback: Optional[Callable[[str, int], Coroutine]] = None
 ) -> Optional[dict]:
     async with pool.acquire() as conn:
         async with conn.transaction():
+            if progress_callback:
+                await progress_callback("Closing session record...", 10)
+            
             ended_session = await conn.fetchrow(
                 "UPDATE sessions SET ended_at = NOW(), pause_until = NOW() + make_interval(hours => $1) "
                 "WHERE id = $2 AND ended_at IS NULL RETURNING *",
@@ -673,6 +677,9 @@ async def end_session(
             )
             if not ended_session:
                 return None
+
+            if progress_callback:
+                await progress_callback("Fetching top uploaders...", 25)
 
             top_users = await conn.fetch(
                 """SELECT * FROM users
@@ -683,10 +690,15 @@ async def end_session(
             )
 
             badge_assignments = []
+            num_top = len(top_users)
             for i, user in enumerate(top_users):
                 rank = i + 1
                 badge = badge_for_rank(rank)
                 if badge:
+                    if progress_callback:
+                        pct = 30 + int((i / num_top) * 30)
+                        await progress_callback(f"Distributing badges ({rank}/{num_top})...", pct)
+                    
                     existing = user['badge_emoji'] or ''
                     new_badges = f"{existing},{badge}" if existing else badge
                     await conn.execute(
@@ -699,29 +711,40 @@ async def end_session(
                         'badge': badge
                     })
 
+            if progress_callback:
+                await progress_callback("Cleaning up session media...", 70)
+            
             await conn.execute("DELETE FROM media WHERE session_id = $1", session_id)
             await conn.execute("UPDATE users SET session_upload_count = 0")
             
+            if progress_callback:
+                await progress_callback("Updating user activity status...", 85)
+
             # Identify top 10% of active users to keep them active as a reward
             total_active = await conn.fetchval("SELECT COUNT(*) FROM users WHERE status = 'active'") or 0
             top_10_percent_limit = max(1, total_active // 10) if total_active > 0 else 0
             
+            # Optimize: Set all active to inactive, then restore top 10%
+            # This is much faster than NOT IN on large tables
+            await conn.execute(
+                "UPDATE users SET status = 'inactive', uploads_since_inactive = 0 WHERE status = 'active'"
+            )
+            
             if top_10_percent_limit > 0:
                 await conn.execute(
-                    """UPDATE users SET status = 'inactive', uploads_since_inactive = 0 
-                       WHERE id NOT IN (
-                           SELECT id FROM users 
-                           WHERE status = 'active' 
-                           ORDER BY total_media_lifetime DESC 
-                           LIMIT $1
-                       ) AND status = 'active'""",
+                    """UPDATE users SET status = 'active' 
+                       WHERE id IN (
+                           SELECT id FROM (
+                               SELECT id FROM users 
+                               ORDER BY total_media_lifetime DESC 
+                               LIMIT $1
+                           ) tmp
+                       )""",
                     top_10_percent_limit
                 )
-            else:
-                await conn.execute(
-                    "UPDATE users SET status = 'inactive', uploads_since_inactive = 0 "
-                    "WHERE status = 'active'"
-                )
+
+            if progress_callback:
+                await progress_callback("Finalizing session data...", 95)
 
             pause_until = ended_session['pause_until']
 

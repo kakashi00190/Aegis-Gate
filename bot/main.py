@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 import asyncpg
 from datetime import datetime, timedelta
 
@@ -110,7 +111,7 @@ async def run_health_server(pool):
             from database import get_advanced_stats
             last_stats = None
             while True:
-                health_monitor.update("stats_broadcast")
+                TaskHealth.update("stats_broadcast")
                 await asyncio.sleep(15) # Broadcast every 15 seconds
                 if not ws_clients:
                     continue
@@ -148,7 +149,9 @@ async def main():
     logger.info("Starting Telegram Media Sharing Bot...")
 
     # Validate environment before starting
-    await validate_environment()
+    if not await validate_environment():
+        logger.error("🛑 Startup aborted due to validation failure.")
+        return
 
     pool = await asyncpg.create_pool(
         config.DATABASE_URL,

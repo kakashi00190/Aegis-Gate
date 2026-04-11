@@ -48,7 +48,8 @@ async def broadcast_session_end(bot: Bot, pool: asyncpg.Pool, result: dict, paus
 
     lines.append(
         f"\n⏸ <b>Uploads are paused for {pause_hours}h</b> while all media is being wiped.\n"
-        f"💤 All users are now <b>inactive</b>.\n"
+        f"💤 Users have been reset to <b>inactive</b>.\n"
+        f"🌟 <b>Top 10% active users</b> have remained <b>active</b> as a reward!\n"
         f"📤 Upload <b>{reactivation_threshold}</b> file(s) when uploads resume to reactivate.\n"
         f"🚀 New session starts in {format_timedelta_until(pause_until)}."
     )

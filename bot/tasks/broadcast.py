@@ -37,7 +37,7 @@ CHUNK_SIZE = 100
 
 _active_users_cache = {
     'users': [],
-    'timestamp': 0
+    'timestamp': time.monotonic() - 1000
 }
 CACHE_TTL = 30  # seconds
 
@@ -73,7 +73,7 @@ async def sent_messages_logger_task(pool: asyncpg.Pool):
             await asyncio.sleep(1)
 
 async def get_cached_active_users(pool: asyncpg.Pool):
-    now = time.time()
+    now = time.monotonic()
     if now - _active_users_cache['timestamp'] > CACHE_TTL:
         _active_users_cache['users'] = await get_all_active_users(pool)
         _active_users_cache['timestamp'] = now
@@ -267,7 +267,7 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 continue
 
             logger.info(f"Claimed {len(raw_items)} media items for broadcast to {len(recipients)} potential recipients.")
-            last_status_log = time.time()
+            last_status_log = time.monotonic()
 
             # Group items by media_group_id or ID if no media_group_id
             grouped_media = {}
@@ -281,7 +281,7 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 broadcast_item(bot, pool, items, recipients, semaphore)
                 for items in grouped_media.values()
             ]
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {e}")

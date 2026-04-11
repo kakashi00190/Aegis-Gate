@@ -76,13 +76,13 @@ async def main():
         if not admin_id: missing.append("ADMIN_ID")
         if not db_url: missing.append("DATABASE_URL")
         logger.error(f"❌ Missing required environment variables: {', '.join(missing)}")
-        sys.exit(1)
+        return False
 
     try:
         port = int(port_str)
     except ValueError:
         logger.error(f"❌ Invalid PORT value: {port_str}")
-        sys.exit(1)
+        return False
 
     # Run checks
     success = True
@@ -103,10 +103,12 @@ async def main():
 
     if success:
         logger.info("🚀 All checks passed! Starting bot...")
-        sys.exit(0)
+        return True
     else:
         logger.error("🛑 Environment validation failed. Fix the issues and try again.")
-        sys.exit(1)
+        return False
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if not asyncio.run(main()):
+        sys.exit(1)
+    sys.exit(0)
