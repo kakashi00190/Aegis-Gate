@@ -45,13 +45,16 @@ CREATE TABLE IF NOT EXISTS media (
     media_group_id TEXT,
     scheduled_at TIMESTAMP WITH TIME ZONE,
     sent_at TIMESTAMP WITH TIME ZONE,
+    claimed_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 ALTER TABLE media ADD COLUMN IF NOT EXISTS media_group_id TEXT;
+ALTER TABLE media ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE;
 
+DROP INDEX IF EXISTS idx_media_queue;
 CREATE INDEX IF NOT EXISTS idx_media_queue ON media(scheduled_at)
-    WHERE sent_at IS NULL AND scheduled_at IS NOT NULL;
+    WHERE sent_at IS NULL AND scheduled_at IS NOT NULL AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '5 minutes');
 CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_activity_at)
     WHERE status = 'active';
@@ -75,11 +78,14 @@ CREATE TABLE IF NOT EXISTS sent_messages (
     recipient_id BIGINT NOT NULL,
     message_id BIGINT NOT NULL,
     session_id INTEGER NOT NULL,
-    media_id INTEGER REFERENCES media(id),
+    media_id INTEGER REFERENCES media(id) ON DELETE SET NULL,
     sent_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-ALTER TABLE sent_messages ADD COLUMN IF NOT EXISTS media_id INTEGER REFERENCES media(id);
+ALTER TABLE sent_messages DROP CONSTRAINT IF EXISTS sent_messages_media_id_fkey;
+ALTER TABLE sent_messages ADD CONSTRAINT sent_messages_media_id_fkey FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE SET NULL;
+
+ALTER TABLE sent_messages ADD COLUMN IF NOT EXISTS media_id INTEGER REFERENCES media(id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS idx_sent_messages_session ON sent_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_sent_messages_recipient ON sent_messages(recipient_id);
@@ -537,7 +543,7 @@ async def unban_user(pool: asyncpg.Pool, user_id: int):
 
 
 async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyncpg.Record]:
-    """Atomically fetch and mark media items as sent in one query.
+    """Atomically fetch and mark media items as claimed in one query.
     Handles media groups by fetching all items in a group if any are due."""
     async with pool.acquire() as conn:
         # First, find IDs of media items that are due
@@ -545,6 +551,7 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
             """SELECT id, media_group_id FROM media
                WHERE scheduled_at <= NOW()
                  AND sent_at IS NULL
+                 AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '5 minutes')
                ORDER BY scheduled_at ASC
                LIMIT $1
                FOR UPDATE SKIP LOCKED""",
@@ -569,7 +576,7 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
         # Update and return
         return await conn.fetch(
             """WITH claimed AS (
-                   UPDATE media SET sent_at = NOW()
+                   UPDATE media SET claimed_at = NOW()
                    WHERE id = ANY($1)
                    RETURNING *
                )
@@ -581,12 +588,21 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
         )
 
 
+async def mark_media_sent(pool: asyncpg.Pool, media_ids: List[int]):
+    """Marks media items as sent successfully."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE media SET sent_at = NOW(), claimed_at = NULL WHERE id = ANY($1)",
+            media_ids
+        )
+
+
 async def unclaim_broadcast(pool: asyncpg.Pool, media_ids: List[int], delay_seconds: int = 30):
-    """Marks media items as not sent and schedules them for a later time."""
+    """Marks media items as not claimed and schedules them for a later time."""
     async with pool.acquire() as conn:
         await conn.execute(
             """UPDATE media SET 
-               sent_at = NULL, 
+               claimed_at = NULL, 
                scheduled_at = NOW() + make_interval(secs => $1)
                WHERE id = ANY($2)""",
             delay_seconds, media_ids

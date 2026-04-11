@@ -11,7 +11,7 @@ import asyncpg
 from database import (
     claim_due_broadcasts, get_all_active_users,
     mark_user_blocked, store_sent_message, is_session_paused,
-    unclaim_broadcast, get_config
+    unclaim_broadcast, get_config, mark_media_sent
 )
 
 logger = logging.getLogger(__name__)
@@ -215,6 +215,11 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
 
     elapsed = round(time.monotonic() - start_time, 1)
     type_label = "album" if len(media_items) > 1 else "media"
+    
+    # Mark as sent in DB now that we've actually delivered (or tried to)
+    m_ids = [item['id'] for item in media_items]
+    await mark_media_sent(pool, m_ids)
+    
     logger.info(
         f"Broadcast complete: {type_label} from {uploader_name} -> "
         f"{sent_count}/{total_targets} delivered, "

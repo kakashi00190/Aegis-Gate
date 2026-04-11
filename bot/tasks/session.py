@@ -52,6 +52,12 @@ async def check_session_end(bot: Bot, pool: asyncpg.Pool):
                 started = started.replace(tzinfo=timezone.utc)
 
             session_end_time = started + timedelta(days=duration_days)
+            time_left = session_end_time - now
+            
+            # Log periodic status if it's been a while
+            if not hasattr(check_session_end, 'last_log') or time.monotonic() - check_session_end.last_log > 3600:
+                logger.info(f"Session #{session['session_number']} status: Ends in {format_timedelta_until(session_end_time)}")
+                check_session_end.last_log = time.monotonic()
 
             if now >= session_end_time:
                 logger.info(f"Auto-ending session #{session['session_number']}")
