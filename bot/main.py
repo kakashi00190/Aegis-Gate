@@ -158,7 +158,9 @@ async def main():
         min_size=5,
         max_size=50,
         command_timeout=60,
-        statement_cache_size=0
+        statement_cache_size=0,
+        max_inactive_connection_lifetime=300.0, # 5 minutes
+        max_queries=1000 # Periodically recycle connections
     )
     logger.info("Database pool created.")
 
