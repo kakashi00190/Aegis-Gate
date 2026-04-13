@@ -21,8 +21,9 @@ def is_admin(user_id: int) -> bool:
 _pause_cooldowns: dict[int, float] = {}
 _upload_cooldowns: dict[int, list[float]] = {} # user_id -> [timestamps]
 COOLDOWN_TTL = 600
-MAX_UPLOADS_PER_WINDOW = 15
-WINDOW_SECONDS = 10
+# Increased for premium experience: 100 uploads per 60 seconds
+MAX_UPLOADS_PER_WINDOW = 100 
+WINDOW_SECONDS = 60
 
 
 def _cleanup_cooldowns(cooldowns: dict, ttl: int = COOLDOWN_TTL):
@@ -56,13 +57,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
     user_uploads = [ts for ts in user_uploads if now_ts - ts < WINDOW_SECONDS]
     
     if len(user_uploads) >= MAX_UPLOADS_PER_WINDOW:
-        # Too many uploads, ignore silently or send a warning once
-        if len(user_uploads) == MAX_UPLOADS_PER_WINDOW:
-            await message.answer(
-                "⚠️ <b>Slow down!</b> You are uploading too fast.\n"
-                "Please wait a few seconds.",
-                parse_mode="HTML"
-            )
+        # Silently ignore extreme floods to protect database
         return
     
     user_uploads.append(now_ts)
