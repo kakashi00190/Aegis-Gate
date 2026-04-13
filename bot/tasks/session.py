@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 async def check_session_end(bot: Bot, pool: asyncpg.Pool):
     while True:
         health_monitor.update("session_check")
-        await asyncio.sleep(60)
+        # Run every 30 minutes instead of every 1 minute for Nano
+        await asyncio.sleep(1800) 
         try:
             session = await get_current_session(pool)
             if not session:

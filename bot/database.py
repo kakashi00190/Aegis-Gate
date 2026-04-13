@@ -821,7 +821,18 @@ async def get_all_notifiable_users(pool: asyncpg.Pool) -> List[asyncpg.Record]:
         return []
 
 
+# Global cache for advanced stats to save Disk IO on Supabase Nano
+_stats_cache = {
+    'data': None,
+    'timestamp': 0
+}
+STATS_CACHE_TTL = 300 # 5 minutes cache
+
 async def get_advanced_stats(pool: asyncpg.Pool) -> dict:
+    now = time.time()
+    if _stats_cache['data'] and now - _stats_cache['timestamp'] < STATS_CACHE_TTL:
+        return _stats_cache['data']
+
     try:
         async with asyncio.timeout(30): # Increased to 30s
             async with pool.acquire() as conn:
@@ -871,7 +882,7 @@ async def get_advanced_stats(pool: asyncpg.Pool) -> dict:
 
                 active_count = user_stats['active_count'] or 0
 
-                return {
+                res = {
                     'total': (user_stats['total_users'] or 0) + unverified,
                     'total_users': user_stats['total_users'] or 0,
                     'active': active_count,
@@ -894,6 +905,11 @@ async def get_advanced_stats(pool: asyncpg.Pool) -> dict:
                     'last_updated': datetime.now(timezone.utc).isoformat(),
                     'status': 'ok'
                 }
+                
+                # Update cache
+                _stats_cache['data'] = res
+                _stats_cache['timestamp'] = time.time()
+                return res
     except asyncio.TimeoutError:
         logger.error("Timeout fetching advanced stats from database")
         return {'status': 'timeout', 'error': 'Database timeout'}
