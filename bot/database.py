@@ -174,7 +174,7 @@ async def init_db(pool: asyncpg.Pool):
             solved_at TIMESTAMP WITH TIME ZONE,
             admin_message_id INTEGER
         )"""),
-        ('sent_messages', """CREATE TABLE IF NOT EXISTS sent_messages (
+        ('sent_messages', """CREATE UNLOGGED TABLE IF NOT EXISTS sent_messages (
             id SERIAL PRIMARY KEY,
             recipient_id BIGINT NOT NULL,
             message_id BIGINT NOT NULL,
@@ -1370,7 +1370,8 @@ async def get_wipe_stats(pool: asyncpg.Pool) -> dict:
 
 async def clear_all_sent_messages(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM sent_messages")
+        # TRUNCATE is much faster and uses almost no Disk IO compared to DELETE
+        await conn.execute("TRUNCATE TABLE sent_messages")
 
 
 async def get_all_sent_messages_batch(

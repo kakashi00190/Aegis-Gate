@@ -116,7 +116,7 @@ async def run_health_server(pool, port=None):
             last_stats = None
             while True:
                 TaskHealth.update("stats_broadcast")
-                await asyncio.sleep(15) # Broadcast every 15 seconds
+                await asyncio.sleep(60) # Increased from 15s to 60s to save Disk IO
                 if not ws_clients:
                     continue
                 
