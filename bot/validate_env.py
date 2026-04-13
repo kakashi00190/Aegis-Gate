@@ -32,18 +32,19 @@ async def validate_database(url: str):
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
     
-    # Try multiple times to handle transient Supabase network issues
-    for attempt in range(1, 4):
+    # Try more times to handle transient Supabase network issues
+    # Increased to 5 attempts with longer timeout for unhealthy DB
+    for attempt in range(1, 6):
         try:
             # Just check connectivity with a simple SELECT 1
             # No need to check tables here as init_db handles that
-            conn = await asyncpg.connect(url, timeout=15, statement_cache_size=0)
+            conn = await asyncpg.connect(url, timeout=30, statement_cache_size=0)
             await conn.execute("SELECT 1")
             await conn.close()
             logger.info(f"✅ Database connection successful on attempt {attempt}.")
             return True
         except Exception as e:
-            if attempt < 3:
+            if attempt < 5:
                 logger.warning(f"⚠️ Database connection attempt {attempt} failed: {e}. Retrying in 5s...")
                 await asyncio.sleep(5)
             else:
