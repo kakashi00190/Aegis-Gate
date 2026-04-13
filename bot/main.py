@@ -165,12 +165,14 @@ async def main():
     )
     logger.info("Database pool created.")
 
-    # Start health server early so Render's health check passes while DB initializes
+    # Start health server early
     loop = asyncio.get_running_loop()
     loop.create_task(run_health_server(pool))
 
-    await init_db(pool)
-    logger.info("Database initialized.")
+    # Run DB init in the background to not block bot startup
+    # This allows polling and broadcasting to start immediately
+    loop.create_task(init_db(pool))
+    logger.info("Database initialization started in background.")
 
     bot = Bot(
         token=config.BOT_TOKEN,

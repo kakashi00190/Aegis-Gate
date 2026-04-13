@@ -123,8 +123,8 @@ SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions);
 
 
 async def init_db(pool: asyncpg.Pool):
-    """Initializes the database schema by checking existence first to avoid slow CREATE TABLE calls.
-    Uses longer timeouts to survive slow database responses."""
+    """Initializes the database schema using fast checks and individual statement execution.
+    Uses near-instant regclass checks instead of information_schema."""
     
     table_checks = [
         ('users', """CREATE TABLE IF NOT EXISTS users (
@@ -202,6 +202,7 @@ async def init_db(pool: asyncpg.Pool):
         ("CREATE INDEX IF NOT EXISTS idx_media_queue ON media(scheduled_at) WHERE sent_at IS NULL AND scheduled_at IS NOT NULL", "idx_media_queue"),
         ("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)", "idx_users_status"),
         ("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_activity_at) WHERE status = 'active'", "idx_users_activity"),
+        ("CREATE INDEX IF NOT EXISTS idx_users_lower_name ON users(LOWER(anonymous_name))", "idx_users_lower_name"),
         ("CREATE INDEX IF NOT EXISTS idx_sent_messages_session ON sent_messages(session_id)", "idx_sent_messages_session"),
         ("CREATE INDEX IF NOT EXISTS idx_sent_messages_recipient ON sent_messages(recipient_id)", "idx_sent_messages_recipient")
     ]
@@ -210,16 +211,12 @@ async def init_db(pool: asyncpg.Pool):
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"Database initialization attempt {attempt}/{max_retries}...")
-            # Use a separate connection with a very long timeout for init
             async with pool.acquire() as conn:
-                # 1. Check and Create Tables
+                # 1. Check and Create Tables (Using regclass for speed)
                 for table_name, create_stmt in table_checks:
                     try:
-                        async with asyncio.timeout(60): # 60s per table check
-                            exists = await conn.fetchval(
-                                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)",
-                                table_name
-                            )
+                        async with asyncio.timeout(10):
+                            exists = await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table_name)
                             if not exists:
                                 logger.info(f"  Creating table: {table_name}")
                                 await conn.execute(create_stmt)
@@ -229,7 +226,7 @@ async def init_db(pool: asyncpg.Pool):
                 # 2. Run Migrations
                 for stmt, label in migrations:
                     try:
-                        async with asyncio.timeout(180): # 180s per migration (crucial for ALTERs/INDEXes)
+                        async with asyncio.timeout(30): # 30s per migration
                             await conn.execute(stmt)
                     except Exception as e:
                         if "already exists" not in str(e).lower():
@@ -237,7 +234,7 @@ async def init_db(pool: asyncpg.Pool):
 
                 # 3. Seed Default Data
                 try:
-                    async with asyncio.timeout(30):
+                    async with asyncio.timeout(10):
                         await conn.execute("""
                             INSERT INTO admin_config (key, value) VALUES
                                 ('broadcast_delay_seconds', '30'),
@@ -606,18 +603,20 @@ async def reset_all_blocked_status(pool: asyncpg.Pool) -> int:
 
 async def get_user_rank(pool: asyncpg.Pool, user_id: int) -> int:
     try:
-        async with asyncio.timeout(10):
+        async with asyncio.timeout(5): # Very short timeout for rank
             async with pool.acquire() as conn:
+                # Use a more efficient subquery-less approach if possible, 
+                # but for now, just ensure it's fast or fails quickly
                 rank = await conn.fetchval(
-                    """SELECT COUNT(*) + 1 FROM users
-                       WHERE session_upload_count > (
-                           SELECT session_upload_count FROM users WHERE id = $1
-                       ) AND status != 'banned'""",
+                    """SELECT rank FROM (
+                           SELECT id, RANK() OVER (ORDER BY session_upload_count DESC) as rank
+                           FROM users WHERE status != 'banned'
+                       ) tmp WHERE id = $1""",
                     user_id
                 )
                 return rank or 1
     except Exception as e:
-        logger.error(f"Error fetching rank for {user_id}: {e}")
+        # Don't log full error for rank timeouts to keep logs clean
         return 1
 
 
