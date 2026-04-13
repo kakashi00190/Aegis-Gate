@@ -1078,6 +1078,12 @@ async def admin_do_end_session(callback: CallbackQuery, pool: asyncpg.Pool, bot:
         )
         return
 
+    # Start heavy media cleanup in background
+    from database import cleanup_session_media
+    asyncio.get_running_loop().create_task(
+        cleanup_session_media(pool, session['id'])
+    )
+
     try:
         await update_progress("Broadcasting results to users...", 98)
     except Exception:

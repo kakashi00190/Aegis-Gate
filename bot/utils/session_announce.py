@@ -68,11 +68,7 @@ async def broadcast_new_session_started(bot: Bot, pool: asyncpg.Pool, new_sessio
     reactivation_threshold = int(config.get('reactivation_threshold', '3'))
 
     users = await get_all_notifiable_users(pool)
-    for user_row in users:
-        user = await get_user(pool, user_row['id'])
-        if not user:
-            continue
-
+    for user in users:
         status = user['status']
 
         if status == 'active':

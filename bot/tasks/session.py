@@ -8,7 +8,8 @@ from aiogram.exceptions import TelegramForbiddenError
 import asyncpg
 from database import (
     get_config, get_current_session, end_session,
-    create_new_session, get_all_notifiable_users, mark_user_blocked
+    create_new_session, get_all_notifiable_users, mark_user_blocked,
+    cleanup_session_media
 )
 from utils.session_announce import broadcast_session_end, broadcast_new_session_started
 from utils.helpers import format_timedelta_until
@@ -32,6 +33,13 @@ async def check_session_end(bot: Bot, pool: asyncpg.Pool):
             now = datetime.now(timezone.utc)
 
             if session['ended_at']:
+                # Self-healing: If session ended but counts weren't reset (e.g. process crash), reset them now
+                async with pool.acquire() as conn:
+                    counts_exist = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM users WHERE session_upload_count > 0)")
+                    if counts_exist:
+                        logger.warning(f"Detected un-reset counts for ended session #{session['session_number']}. Fixing...")
+                        await conn.execute("UPDATE users SET session_upload_count = 0")
+
                 pause_until = session['pause_until']
                 if not pause_until:
                     new_session = await create_new_session(pool)
@@ -71,8 +79,17 @@ async def check_session_end(bot: Bot, pool: asyncpg.Pool):
                 if not result:
                     logger.info(f"Session #{session['session_number']} already ended, skipping")
                     continue
+                
+                # Start heavy media cleanup in background
+                asyncio.get_running_loop().create_task(
+                    cleanup_session_media(pool, session['id'])
+                )
+                
+                # Broadcast end results immediately (now that end_session is fast)
                 await broadcast_session_end(bot, pool, result, pause_hours)
                 logger.info(f"Session #{session['session_number']} ended, pause for {pause_hours}h")
+                
+                # Also start message deletion in background
                 asyncio.get_running_loop().create_task(
                     delete_session_messages(bot, pool, session['id'])
                 )

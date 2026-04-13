@@ -815,7 +815,7 @@ async def get_all_notifiable_users(pool: asyncpg.Pool) -> List[asyncpg.Record]:
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 return await conn.fetch(
-                    "SELECT id FROM users WHERE status NOT IN ('banned') AND bot_blocked = FALSE"
+                    "SELECT id, status FROM users WHERE status NOT IN ('banned') AND bot_blocked = FALSE"
                 )
     except Exception as e:
         logger.error(f"Error fetching notifiable users: {repr(e)}")
@@ -1137,7 +1137,7 @@ async def end_session(
     leaderboard_top: int,
     progress_callback: Optional[Callable[[str, int], Coroutine]] = None
 ) -> Optional[dict]:
-    """Ends a session, handles badges, and cleans up data in manageable chunks."""
+    """Ends a session, handles badges, and resets stats. Media cleanup should be handled separately."""
     
     # 1. Close session record first (short transaction)
     async with pool.acquire() as conn:
@@ -1152,7 +1152,7 @@ async def end_session(
         if not ended_session:
             return None
 
-    # 2. Process badges
+    # 2. Process badges (MUST happen before resetting counts)
     async with pool.acquire() as conn:
         if progress_callback:
             await progress_callback("Fetching top uploaders...", 15)
@@ -1176,49 +1176,34 @@ async def end_session(
                     await progress_callback(f"Distributing badges ({rank}/{num_top})...", pct)
                 
                 existing = user['badge_emoji'] or ''
-                new_badges = f"{existing},{badge}" if existing else badge
-                await conn.execute(
-                    "UPDATE users SET badge_emoji = $1 WHERE id = $2",
-                    new_badges, user['id']
-                )
+                # Only add badge if not already present
+                if badge not in existing:
+                    new_badges = f"{existing},{badge}" if existing else badge
+                    await conn.execute(
+                        "UPDATE users SET badge_emoji = $1 WHERE id = $2",
+                        new_badges, user['id']
+                    )
+                
                 badge_assignments.append({
                     'user': dict(user),
                     'rank': rank,
                     'badge': badge
                 })
 
-    # 3. Cleanup session media in CHUNKS to avoid massive table locking
+    # 3. Reset upload counts IMMEDIATELY after badge processing
     async with pool.acquire() as conn:
         if progress_callback:
-            await progress_callback("Preparing media cleanup...", 40)
+            await progress_callback("Resetting user stats...", 50)
         
-        total_media = await conn.fetchval("SELECT COUNT(*) FROM media WHERE session_id = $1", session_id) or 0
-        deleted_media = 0
-        
-        while True:
-            # Delete in smaller batches of 200 to save CPU/IO on Nano instance
-            res = await conn.execute(
-                "DELETE FROM media WHERE id IN (SELECT id FROM media WHERE session_id = $1 LIMIT 200)", 
-                session_id
-            )
-            count = int(res.split()[-1])
-            if count == 0:
-                break
-            deleted_media += count
-            if progress_callback and total_media > 0:
-                pct = 40 + int((deleted_media / total_media) * 30)
-                await progress_callback(f"Cleaning up media ({deleted_media}/{total_media})...", pct)
-            await asyncio.sleep(0.5) # Increased pause to let Supabase Nano breathe
-
-    # 4. Reset upload counts and update activity status in chunks
-    async with pool.acquire() as conn:
-        if progress_callback:
-            await progress_callback("Resetting user stats...", 75)
-
-        # Reset in chunks if there are many users (though session_upload_count is usually few users)
+        # Reset counts for everyone. This is critical for the leaderboard.
         await conn.execute("UPDATE users SET session_upload_count = 0 WHERE session_upload_count > 0")
         await asyncio.sleep(0.5)
-        
+
+    # 4. Update activity status in chunks
+    async with pool.acquire() as conn:
+        if progress_callback:
+            await progress_callback("Updating activity status...", 70)
+
         # Identify top 10% of active users
         total_active = await conn.fetchval("SELECT COUNT(*) FROM users WHERE status = 'active'") or 0
         top_10_percent_limit = max(1, total_active // 10) if total_active > 0 else 0
@@ -1228,7 +1213,6 @@ async def end_session(
 
         # Reset status for all active users EXCEPT the top 10%
         if top_10_percent_limit > 0:
-            # Using a more efficient way to exclude top users without heavy subqueries
             await conn.execute(
                 """UPDATE users SET status = 'inactive', uploads_since_inactive = 0 
                    WHERE status = 'active' AND id NOT IN (
@@ -1255,6 +1239,33 @@ async def end_session(
             'pause_until': pause_until,
             'top_users': [dict(u) for u in top_users],
         }
+
+
+async def cleanup_session_media(pool: asyncpg.Pool, session_id: int):
+    """Background task to clean up media from an ended session in chunks."""
+    try:
+        logger.info(f"Starting media cleanup for session #{session_id}")
+        async with pool.acquire() as conn:
+            total_media = await conn.fetchval("SELECT COUNT(*) FROM media WHERE session_id = $1", session_id) or 0
+            deleted_media = 0
+            
+            while True:
+                # Delete in smaller batches of 200 to save CPU/IO on Nano instance
+                res = await conn.execute(
+                    "DELETE FROM media WHERE id IN (SELECT id FROM media WHERE session_id = $1 LIMIT 200)", 
+                    session_id
+                )
+                count = int(res.split()[-1])
+                if count == 0:
+                    break
+                deleted_media += count
+                if deleted_media % 1000 == 0:
+                    logger.info(f"Cleanup session #{session_id}: {deleted_media}/{total_media} media deleted")
+                await asyncio.sleep(1.0) # 1s pause between batches for Nano health
+            
+            logger.info(f"Completed media cleanup for session #{session_id}. Total: {deleted_media}")
+    except Exception as e:
+        logger.error(f"Error in cleanup_session_media for session #{session_id}: {repr(e)}")
 
 
 async def create_new_session(pool: asyncpg.Pool) -> asyncpg.Record:
