@@ -214,26 +214,26 @@ async def init_db(pool: asyncpg.Pool):
         try:
             logger.info(f"Database initialization attempt {attempt}/{max_retries}...")
             async with pool.acquire() as conn:
-                # 1. Check and Create Tables (Using regclass for speed)
-                for table_name, create_stmt in table_checks:
-                    try:
-                        async with asyncio.timeout(15):
+                # Use a long transaction-level timeout for the whole process
+                async with asyncio.timeout(300): # 5 minutes for the whole init
+                    # 1. Check and Create Tables (Using regclass for speed)
+                    for table_name, create_stmt in table_checks:
+                        try:
                             exists = await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table_name)
                             if not exists:
                                 logger.info(f"  Creating table: {table_name}")
                                 await conn.execute(create_stmt)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"  ⚠️ Timeout checking/creating table {table_name}")
-                    except Exception as e:
-                        logger.warning(f"  ⚠️ Table check/create failed for {table_name}: {repr(e)}")
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ Table check/create failed for {table_name}: {repr(e)}")
 
-                # 2. Run Migrations
+                # 2. Run Migrations (Patiently)
                 for stmt, label in migrations:
                     try:
-                        async with asyncio.timeout(30): # 30s per migration
+                        # Long timeout for migrations on slow Nano instances
+                        async with asyncio.timeout(120): 
                             await conn.execute(stmt)
                     except Exception as e:
-                        if "already exists" not in str(e).lower():
+                        if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower():
                             logger.warning(f"  ⚠️ Migration failed ({label}): {repr(e)}")
 
                 # 3. Seed Default Data

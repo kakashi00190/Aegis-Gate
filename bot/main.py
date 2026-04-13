@@ -147,6 +147,9 @@ async def run_health_server(pool):
 
 
 async def main():
+    # Wait for potential old instances to shut down on Render
+    await asyncio.sleep(5)
+    
     logger.info("Starting Telegram Media Sharing Bot...")
 
     # Validate environment before starting
@@ -156,8 +159,8 @@ async def main():
 
     pool = await asyncpg.create_pool(
         config.DATABASE_URL,
-        min_size=2,
-        max_size=20, # Reduced to 20 to avoid Supabase free tier limits
+        min_size=1, # Minimum connections for Supabase Nano
+        max_size=15, # Further reduced to 15 for stability
         command_timeout=60,
         statement_cache_size=0,
         max_inactive_connection_lifetime=300.0,
