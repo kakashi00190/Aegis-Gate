@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 async def check_session_end(bot: Bot, pool: asyncpg.Pool):
     while True:
         health_monitor.update("session_check")
-        # Run every 30 minutes instead of every 1 minute for Nano
-        await asyncio.sleep(1800) 
         try:
             session = await get_current_session(pool)
             if not session:
+                # Still wait even if no session
+                await asyncio.sleep(1800)
                 continue
 
             now = datetime.now(timezone.utc)
@@ -45,6 +45,7 @@ async def check_session_end(bot: Bot, pool: asyncpg.Pool):
                     new_session = await create_new_session(pool)
                     logger.info(f"Created session #{new_session['session_number']} (no pause_until)")
                     await broadcast_new_session_started(bot, pool, new_session)
+                    await asyncio.sleep(1800)
                     continue
 
                 if pause_until.tzinfo is None:
@@ -54,6 +55,9 @@ async def check_session_end(bot: Bot, pool: asyncpg.Pool):
                     new_session = await create_new_session(pool)
                     logger.info(f"Pause ended. Created session #{new_session['session_number']}")
                     await broadcast_new_session_started(bot, pool, new_session)
+                
+                # After handling an ended session, sleep and continue
+                await asyncio.sleep(1800)
                 continue
 
             config = await get_config(pool)
@@ -78,6 +82,7 @@ async def check_session_end(bot: Bot, pool: asyncpg.Pool):
                 result = await end_session(pool, session['id'], pause_hours, top_n)
                 if not result:
                     logger.info(f"Session #{session['session_number']} already ended, skipping")
+                    await asyncio.sleep(1800)
                     continue
                 
                 # Start heavy media cleanup in background
@@ -93,6 +98,10 @@ async def check_session_end(bot: Bot, pool: asyncpg.Pool):
                 asyncio.get_running_loop().create_task(
                     delete_session_messages(bot, pool, session['id'])
                 )
+            
+            # Wait 30 minutes before next check
+            await asyncio.sleep(1800)
 
         except Exception as e:
             logger.error(f"Session check error: {repr(e)}")
+            await asyncio.sleep(60) # Short wait on error
