@@ -1273,11 +1273,12 @@ async def create_new_session(pool: asyncpg.Pool) -> asyncpg.Record:
         async with asyncio.timeout(15):
             async with pool.acquire() as conn:
                 async with conn.transaction():
-                    await conn.execute("UPDATE users SET session_upload_count = 0")
+                    # Check for un-reset counts first to be absolutely sure
+                    await conn.execute("UPDATE users SET session_upload_count = 0 WHERE session_upload_count > 0")
                     last = await conn.fetchrow("SELECT MAX(session_number) as max_num FROM sessions")
                     next_number = (last['max_num'] or 0) + 1
                     return await conn.fetchrow(
-                        "INSERT INTO sessions (session_number) VALUES ($1) RETURNING *",
+                        "INSERT INTO sessions (session_number, started_at) VALUES ($1, NOW()) RETURNING *",
                         next_number
                     )
     except Exception as e:
