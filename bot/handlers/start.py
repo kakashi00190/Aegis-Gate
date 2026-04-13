@@ -11,7 +11,7 @@ import asyncpg
 from database import (
     get_user, create_user, name_exists, get_config, mark_user_unblocked,
     save_pending_verification, get_pending_verification, clear_pending_verification,
-    is_session_paused
+    is_session_paused, get_start_context, get_verification_context
 )
 from utils.names import generate_anonymous_name
 from utils.helpers import format_timedelta_until
@@ -61,7 +61,16 @@ async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
         return
     _start_cooldowns[user_id] = now
 
-    user = await get_user(pool, user_id)
+    # 1. Fetch User, Pending, Session, and Config in ONE optimized call
+    context = await get_start_context(pool, user_id)
+    if not context['success']:
+        await message.answer("⚠️ Database is busy. Please try again in a moment.")
+        return
+
+    user = context['user']
+    pending = context['pending']
+    session = context['session']
+    config = context['config']
 
     if user:
         if user['status'] == 'banned':
@@ -70,7 +79,18 @@ async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
 
         await mark_user_unblocked(pool, user_id)
 
-        paused, pause_until = await is_session_paused(pool)
+        # 2. Check Session Status locally using fetched session
+        paused = False
+        pause_until = None
+        if session and session['pause_until']:
+            from datetime import datetime, timezone
+            now_dt = datetime.now(timezone.utc)
+            pause_until = session['pause_until']
+            if pause_until.tzinfo is None:
+                pause_until = pause_until.replace(tzinfo=timezone.utc)
+            if now_dt < pause_until:
+                paused = True
+
         pause_note = ""
         if paused:
             time_left = format_timedelta_until(pause_until)
@@ -79,7 +99,6 @@ async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
                 f"Uploads resume in <b>{time_left}</b>."
             )
 
-        config = await get_config(pool)
         reactivation_threshold = int(config.get('reactivation_threshold', '3'))
         activation_threshold = int(config.get('activation_threshold', '10'))
 
@@ -104,7 +123,6 @@ async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
         await state.clear()
         return
 
-    pending = await get_pending_verification(pool, user_id)
     if pending:
         reserved_name = pending['reserved_name']
         question, new_answer = make_math_question()
@@ -121,6 +139,7 @@ async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
 
     name = generate_anonymous_name()
     attempts = 0
+    # name_exists still uses a query, but we only do it for new users
     while await name_exists(pool, name) and attempts < 20:
         name = generate_anonymous_name()
         attempts += 1
@@ -165,7 +184,15 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
 
     await state.clear()
 
-    pending = await get_pending_verification(pool, message.from_user.id)
+    # Optimized verification context fetch
+    context = await get_verification_context(pool, message.from_user.id)
+    if not context['success']:
+        await message.answer("⚠️ Database is busy. Please try again in a moment.")
+        return
+
+    pending = context['pending']
+    config = context['config']
+
     if pending:
         name = pending['reserved_name']
     else:
@@ -173,7 +200,6 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
         while await name_exists(pool, name):
             name = generate_anonymous_name()
 
-    config = await get_config(pool)
     threshold = int(config.get('activation_threshold', '10'))
 
     await create_user(pool, message.from_user.id, name)

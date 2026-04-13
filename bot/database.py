@@ -204,7 +204,9 @@ async def init_db(pool: asyncpg.Pool):
         ("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_activity_at) WHERE status = 'active'", "idx_users_activity"),
         ("CREATE INDEX IF NOT EXISTS idx_users_lower_name ON users(LOWER(anonymous_name))", "idx_users_lower_name"),
         ("CREATE INDEX IF NOT EXISTS idx_sent_messages_session ON sent_messages(session_id)", "idx_sent_messages_session"),
-        ("CREATE INDEX IF NOT EXISTS idx_sent_messages_recipient ON sent_messages(recipient_id)", "idx_sent_messages_recipient")
+        ("CREATE INDEX IF NOT EXISTS idx_sent_messages_recipient ON sent_messages(recipient_id)", "idx_sent_messages_recipient"),
+        ("CREATE INDEX IF NOT EXISTS idx_users_session_uploads ON users(session_upload_count DESC)", "idx_users_session_uploads"),
+        ("CREATE INDEX IF NOT EXISTS idx_users_lifetime_media ON users(total_media_lifetime DESC)", "idx_users_lifetime_media")
     ]
 
     max_retries = 3
@@ -215,13 +217,15 @@ async def init_db(pool: asyncpg.Pool):
                 # 1. Check and Create Tables (Using regclass for speed)
                 for table_name, create_stmt in table_checks:
                     try:
-                        async with asyncio.timeout(10):
+                        async with asyncio.timeout(15):
                             exists = await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table_name)
                             if not exists:
                                 logger.info(f"  Creating table: {table_name}")
                                 await conn.execute(create_stmt)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"  ⚠️ Timeout checking/creating table {table_name}")
                     except Exception as e:
-                        logger.warning(f"  ⚠️ Table check/create failed for {table_name}: {e}")
+                        logger.warning(f"  ⚠️ Table check/create failed for {table_name}: {repr(e)}")
 
                 # 2. Run Migrations
                 for stmt, label in migrations:
@@ -230,7 +234,7 @@ async def init_db(pool: asyncpg.Pool):
                             await conn.execute(stmt)
                     except Exception as e:
                         if "already exists" not in str(e).lower():
-                            logger.warning(f"  ⚠️ Migration failed ({label}): {e}")
+                            logger.warning(f"  ⚠️ Migration failed ({label}): {repr(e)}")
 
                 # 3. Seed Default Data
                 try:
@@ -250,12 +254,12 @@ async def init_db(pool: asyncpg.Pool):
                             "INSERT INTO sessions (session_number) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions)"
                         )
                 except Exception as e:
-                    logger.warning(f"  ⚠️ Seeding data failed: {e}")
+                    logger.warning(f"  ⚠️ Seeding data failed: {repr(e)}")
 
             logger.info("✅ Database schema initialization complete.")
             return
         except Exception as e:
-            logger.error(f"❌ Initialization failed on attempt {attempt}: {e}")
+            logger.error(f"❌ Initialization failed on attempt {attempt}: {repr(e)}")
             if attempt == max_retries:
                 raise
             await asyncio.sleep(5)
@@ -268,7 +272,7 @@ async def get_config(pool: asyncpg.Pool) -> Dict[str, str]:
                 rows = await conn.fetch("SELECT key, value FROM admin_config")
                 return {row['key']: row['value'] for row in rows}
     except Exception as e:
-        logger.error(f"Error fetching config: {e}")
+        logger.error(f"Error fetching config: {repr(e)}")
         return {}
 
 
@@ -282,7 +286,7 @@ async def set_config(pool: asyncpg.Pool, key: str, value: str):
                     key, value
                 )
     except Exception as e:
-        logger.error(f"Error setting config {key}: {e}")
+        logger.error(f"Error setting config {key}: {repr(e)}")
 
 
 async def get_user(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]:
@@ -291,8 +295,77 @@ async def get_user(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]
             async with pool.acquire() as conn:
                 return await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
     except Exception as e:
-        logger.error(f"Error fetching user {user_id}: {e}")
+        logger.error(f"Error fetching user {user_id}: {repr(e)}")
         return None
+
+
+async def get_upload_context(pool: asyncpg.Pool, user_id: int) -> dict:
+    """Fetches user, current session, and config in a single optimized block for uploads."""
+    try:
+        async with asyncio.timeout(15):
+            async with pool.acquire() as conn:
+                user_task = conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+                session_task = conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
+                config_task = conn.fetch("SELECT key, value FROM admin_config")
+                
+                user, session, config_rows = await asyncio.gather(user_task, session_task, config_task)
+                
+                config = {row['key']: row['value'] for row in config_rows}
+                return {
+                    'user': user,
+                    'session': session,
+                    'config': config,
+                    'success': True
+                }
+    except Exception as e:
+        logger.error(f"Error fetching upload context for {user_id}: {repr(e)}")
+        return {'success': False, 'error': str(e)}
+
+
+async def get_start_context(pool: asyncpg.Pool, user_id: int) -> dict:
+    """Fetches user, pending verification, current session, and config in a single optimized block for /start."""
+    try:
+        async with asyncio.timeout(15):
+            async with pool.acquire() as conn:
+                user_task = conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+                pending_task = conn.fetchrow("SELECT * FROM pending_verifications WHERE user_id = $1", user_id)
+                session_task = conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
+                config_task = conn.fetch("SELECT key, value FROM admin_config")
+                
+                user, pending, session, config_rows = await asyncio.gather(user_task, pending_task, session_task, config_task)
+                
+                config = {row['key']: row['value'] for row in config_rows}
+                return {
+                    'user': user,
+                    'pending': pending,
+                    'session': session,
+                    'config': config,
+                    'success': True
+                }
+    except Exception as e:
+        logger.error(f"Error fetching start context for {user_id}: {repr(e)}")
+        return {'success': False, 'error': str(e)}
+
+
+async def get_verification_context(pool: asyncpg.Pool, user_id: int) -> dict:
+    """Fetches pending verification and config in a single optimized block for verification."""
+    try:
+        async with asyncio.timeout(15):
+            async with pool.acquire() as conn:
+                pending_task = conn.fetchrow("SELECT * FROM pending_verifications WHERE user_id = $1", user_id)
+                config_task = conn.fetch("SELECT key, value FROM admin_config")
+                
+                pending, config_rows = await asyncio.gather(pending_task, config_task)
+                
+                config = {row['key']: row['value'] for row in config_rows}
+                return {
+                    'pending': pending,
+                    'config': config,
+                    'success': True
+                }
+    except Exception as e:
+        logger.error(f"Error fetching verification context for {user_id}: {repr(e)}")
+        return {'success': False, 'error': str(e)}
 
 
 async def get_user_by_name(pool: asyncpg.Pool, name: str) -> Optional[asyncpg.Record]:
@@ -303,7 +376,7 @@ async def get_user_by_name(pool: asyncpg.Pool, name: str) -> Optional[asyncpg.Re
                     "SELECT * FROM users WHERE LOWER(anonymous_name) = LOWER($1)", name
                 )
     except Exception as e:
-        logger.error(f"Error fetching user by name {name}: {e}")
+        logger.error(f"Error fetching user by name {name}: {repr(e)}")
         return None
 
 
@@ -322,7 +395,7 @@ async def get_user_by_id_or_name(pool: asyncpg.Pool, query: str) -> Optional[asy
                     "SELECT * FROM users WHERE LOWER(anonymous_name) = LOWER($1)", query
                 )
     except Exception as e:
-        logger.error(f"Error fetching user by id or name {query}: {e}")
+        logger.error(f"Error fetching user by id or name {query}: {repr(e)}")
         return None
 
 
@@ -334,7 +407,7 @@ async def name_exists(pool: asyncpg.Pool, name: str) -> bool:
                     "SELECT 1 FROM users WHERE LOWER(anonymous_name) = LOWER($1)", name
                 ))
     except Exception as e:
-        logger.error(f"Error checking name existence {name}: {e}")
+        logger.error(f"Error checking name existence {name}: {repr(e)}")
         return False
 
 
@@ -348,7 +421,7 @@ async def save_pending_verification(pool: asyncpg.Pool, user_id: int, answer: in
                     user_id, answer, reserved_name
                 )
     except Exception as e:
-        logger.error(f"Error saving verification for {user_id}: {e}")
+        logger.error(f"Error saving verification for {user_id}: {repr(e)}")
 
 
 async def get_pending_verification(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]:
@@ -359,7 +432,7 @@ async def get_pending_verification(pool: asyncpg.Pool, user_id: int) -> Optional
                     "SELECT * FROM pending_verifications WHERE user_id = $1", user_id
                 )
     except Exception as e:
-        logger.error(f"Error fetching verification for {user_id}: {e}")
+        logger.error(f"Error fetching verification for {user_id}: {repr(e)}")
         return None
 
 
@@ -371,7 +444,7 @@ async def clear_pending_verification(pool: asyncpg.Pool, user_id: int):
                     "DELETE FROM pending_verifications WHERE user_id = $1", user_id
                 )
     except Exception as e:
-        logger.error(f"Error clearing verification for {user_id}: {e}")
+        logger.error(f"Error clearing verification for {user_id}: {repr(e)}")
 
 
 async def cleanup_stale_verifications(pool: asyncpg.Pool, max_age_hours: int = 24) -> int:
@@ -385,22 +458,30 @@ async def cleanup_stale_verifications(pool: asyncpg.Pool, max_age_hours: int = 2
                 count = int(result.split()[-1]) if result else 0
                 return count
     except Exception as e:
-        logger.error(f"Error cleaning up verifications: {e}")
+        logger.error(f"Error cleaning up verifications: {repr(e)}")
         return 0
 
 
 async def create_user(pool: asyncpg.Pool, user_id: int, anonymous_name: str) -> asyncpg.Record:
-    try:
-        async with asyncio.timeout(10):
-            async with pool.acquire() as conn:
-                return await conn.fetchrow(
-                    "INSERT INTO users (id, anonymous_name, status) VALUES ($1, $2, 'pending') "
-                    "ON CONFLICT (id) DO UPDATE SET anonymous_name = users.anonymous_name RETURNING *",
-                    user_id, anonymous_name
-                )
-    except Exception as e:
-        logger.error(f"Error creating user {user_id}: {e}")
-        raise
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with asyncio.timeout(15): # Increased timeout
+                async with pool.acquire() as conn:
+                    return await conn.fetchrow(
+                        "INSERT INTO users (id, anonymous_name, status) VALUES ($1, $2, 'pending') "
+                        "ON CONFLICT (id) DO UPDATE SET anonymous_name = users.anonymous_name RETURNING *",
+                        user_id, anonymous_name
+                    )
+        except asyncio.TimeoutError:
+            if attempt == max_retries:
+                logger.error(f"Final timeout error creating user {user_id}")
+                raise
+            logger.warning(f"Timeout creating user {user_id}, retrying ({attempt}/{max_retries})...")
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"Error creating user {user_id}: {repr(e)}")
+            raise
 
 
 async def get_current_session(pool: asyncpg.Pool) -> Optional[asyncpg.Record]:
@@ -411,7 +492,7 @@ async def get_current_session(pool: asyncpg.Pool) -> Optional[asyncpg.Record]:
                     "SELECT * FROM sessions ORDER BY id DESC LIMIT 1"
                 )
     except Exception as e:
-        logger.error(f"Error fetching current session: {e}")
+        logger.error(f"Error fetching current session: {repr(e)}")
         return None
 
 
@@ -468,7 +549,7 @@ async def add_media(
                     user_id, session_id, file_id, file_unique_id, media_type, scheduled_at, media_group_id
                 )
     except Exception as e:
-        logger.error(f"Error adding media for {user_id}: {e}")
+        logger.error(f"Error adding media for {user_id}: {repr(e)}")
         return None
 
 
@@ -518,7 +599,7 @@ async def update_user_on_upload(
         logger.error(f"Timeout updating user {user_id} on upload")
         return {}
     except Exception as e:
-        logger.error(f"Error updating user {user_id} on upload: {e}")
+        logger.error(f"Error updating user {user_id} on upload: {repr(e)}")
         return {}
 
 
@@ -533,7 +614,7 @@ async def activate_user(pool: asyncpg.Pool, user_id: int) -> bool:
                 )
                 return bool(result)
     except Exception as e:
-        logger.error(f"Error activating user {user_id}: {e}")
+        logger.error(f"Error activating user {user_id}: {repr(e)}")
         return False
 
 
@@ -548,7 +629,7 @@ async def reactivate_user(pool: asyncpg.Pool, user_id: int) -> bool:
                 )
                 return bool(result)
     except Exception as e:
-        logger.error(f"Error reactivating user {user_id}: {e}")
+        logger.error(f"Error reactivating user {user_id}: {repr(e)}")
         return False
 
 
@@ -562,7 +643,7 @@ async def increment_inactive_uploads(pool: asyncpg.Pool, user_id: int) -> int:
                     user_id
                 )
     except Exception as e:
-        logger.error(f"Error incrementing inactive uploads for {user_id}: {e}")
+        logger.error(f"Error incrementing inactive uploads for {user_id}: {repr(e)}")
         return 0
 
 
@@ -575,7 +656,7 @@ async def mark_user_blocked(pool: asyncpg.Pool, user_id: int):
                     user_id
                 )
     except Exception as e:
-        logger.error(f"Error marking user {user_id} as blocked: {e}")
+        logger.error(f"Error marking user {user_id} as blocked: {repr(e)}")
 
 
 async def mark_user_unblocked(pool: asyncpg.Pool, user_id: int):
@@ -587,7 +668,7 @@ async def mark_user_unblocked(pool: asyncpg.Pool, user_id: int):
                     user_id
                 )
     except Exception as e:
-        logger.error(f"Error marking user {user_id} as unblocked: {e}")
+        logger.error(f"Error marking user {user_id} as unblocked: {repr(e)}")
 
 
 async def reset_all_blocked_status(pool: asyncpg.Pool) -> int:
@@ -597,26 +678,28 @@ async def reset_all_blocked_status(pool: asyncpg.Pool) -> int:
                 result = await conn.execute("UPDATE users SET bot_blocked = FALSE WHERE status != 'banned'")
                 return int(result.split()[-1]) if result else 0
     except Exception as e:
-        logger.error(f"Error resetting blocked status: {e}")
+        logger.error(f"Error resetting blocked status: {repr(e)}")
         return 0
 
 
 async def get_user_rank(pool: asyncpg.Pool, user_id: int) -> int:
     try:
-        async with asyncio.timeout(5): # Very short timeout for rank
+        async with asyncio.timeout(5):
             async with pool.acquire() as conn:
-                # Use a more efficient subquery-less approach if possible, 
-                # but for now, just ensure it's fast or fails quickly
+                # Optimized rank calculation: count users with more uploads
                 rank = await conn.fetchval(
-                    """SELECT rank FROM (
-                           SELECT id, RANK() OVER (ORDER BY session_upload_count DESC) as rank
-                           FROM users WHERE status != 'banned'
-                       ) tmp WHERE id = $1""",
+                    """
+                    SELECT COUNT(*) + 1 
+                    FROM users 
+                    WHERE session_upload_count > (
+                        SELECT session_upload_count FROM users WHERE id = $1
+                    ) AND status != 'banned'
+                    """,
                     user_id
                 )
                 return rank or 1
     except Exception as e:
-        # Don't log full error for rank timeouts to keep logs clean
+        logger.debug(f"Error fetching rank for {user_id}: {repr(e)}")
         return 1
 
 
@@ -631,7 +714,7 @@ async def get_leaderboard(pool: asyncpg.Pool, limit: int = 10) -> List[asyncpg.R
                     limit
                 )
     except Exception as e:
-        logger.error(f"Error fetching leaderboard: {e}")
+        logger.error(f"Error fetching leaderboard: {repr(e)}")
         return []
 
 
@@ -643,7 +726,7 @@ async def get_all_active_users(pool: asyncpg.Pool) -> List[asyncpg.Record]:
                     "SELECT id FROM users WHERE status = 'active' AND bot_blocked = FALSE"
                 )
     except Exception as e:
-        logger.error(f"Error fetching active users: {e}")
+        logger.error(f"Error fetching active users: {repr(e)}")
         return []
 
 
@@ -655,7 +738,7 @@ async def count_active_users(pool: asyncpg.Pool) -> int:
                     "SELECT COUNT(*) FROM users WHERE status = 'active' AND bot_blocked = FALSE"
                 )
     except Exception as e:
-        logger.error(f"Error counting active users: {e}")
+        logger.error(f"Error counting active users: {repr(e)}")
         return 0
 
 
@@ -667,56 +750,43 @@ async def get_all_notifiable_users(pool: asyncpg.Pool) -> List[asyncpg.Record]:
                     "SELECT id FROM users WHERE status NOT IN ('banned') AND bot_blocked = FALSE"
                 )
     except Exception as e:
-        logger.error(f"Error fetching notifiable users: {e}")
+        logger.error(f"Error fetching notifiable users: {repr(e)}")
         return []
 
 
 async def get_advanced_stats(pool: asyncpg.Pool) -> dict:
     try:
-        async with asyncio.timeout(10): # 10 second timeout
+        async with asyncio.timeout(30): # Increased to 30s
             async with pool.acquire() as conn:
-                # 1. Basic counts using optimized CASE for status classification
-                status_rows = await conn.fetch("""
+                # 1. Combined User Stats (One table scan instead of many)
+                user_stats = await conn.fetchrow("""
                     SELECT 
-                        CASE 
-                            WHEN bot_blocked = TRUE THEN 'blocked'
-                            WHEN status = 'banned' THEN 'banned'
-                            ELSE status
-                        END as derived_status,
-                        COUNT(*) as count 
-                    FROM users 
-                    GROUP BY derived_status
+                        COUNT(*) as total_users,
+                        COUNT(*) FILTER (WHERE status = 'active' AND bot_blocked = FALSE) as active_count,
+                        COUNT(*) FILTER (WHERE status = 'inactive' AND bot_blocked = FALSE) as inactive_count,
+                        COUNT(*) FILTER (WHERE status = 'pending' AND bot_blocked = FALSE) as pending_count,
+                        COUNT(*) FILTER (WHERE status = 'banned') as banned_count,
+                        COUNT(*) FILTER (WHERE bot_blocked = TRUE) as blocked_count,
+                        COUNT(*) FILTER (WHERE last_activity_at > NOW() - INTERVAL '24 hours' AND bot_blocked = FALSE) as active_24h,
+                        COUNT(*) FILTER (WHERE joined_at > NOW() - INTERVAL '24 hours') as joined_today,
+                        COUNT(*) FILTER (WHERE joined_at > NOW() - INTERVAL '7 days') as joined_7d,
+                        COALESCE(SUM(exp), 0) as total_exp
+                    FROM users
                 """)
-                
-                counts = {row['derived_status']: int(row['count']) for row in status_rows}
 
-                # 2. Key totals
-                total_users = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
-                unverified = await conn.fetchval("SELECT COUNT(*) FROM pending_verifications") or 0
-                total_all = total_users + unverified
-
-                active_count = counts.get('active', 0)
-                inactive_count = counts.get('inactive', 0)
-                pending_count = counts.get('pending', 0)
-                banned_count = counts.get('banned', 0)
-                blocked_count = counts.get('blocked', 0)
-
-                # 3. Real-time media analysis
+                # 2. Combined Media Stats
                 media_stats = await conn.fetchrow("""
                     SELECT 
                         COUNT(*) FILTER (WHERE sent_at IS NULL AND scheduled_at IS NOT NULL) as in_queue,
                         COUNT(*) FILTER (WHERE sent_at > NOW() - INTERVAL '24 hours') as sent_today
                     FROM media
                 """)
-                
-                in_queue = media_stats['in_queue'] or 0
-                sent_today = media_stats['sent_today'] or 0
 
-                # 4. Activity and Session Info
-                active_24h = await conn.fetchval(
-                    "SELECT COUNT(*) FROM users WHERE last_activity_at > NOW() - INTERVAL '24 hours' AND bot_blocked = FALSE"
-                ) or 0
-                
+                # 3. Quick standalone counts
+                unverified = await conn.fetchval("SELECT COUNT(*) FROM pending_verifications") or 0
+                unsolved_reports = await conn.fetchval("SELECT COUNT(*) FROM reports WHERE solved = FALSE") or 0
+
+                # 4. Session Info
                 session = await conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
                 session_total = 0
                 if session:
@@ -724,37 +794,31 @@ async def get_advanced_stats(pool: asyncpg.Pool) -> dict:
                         "SELECT COUNT(*) FROM media WHERE session_id = $1", session['id']
                     ) or 0
 
+                # 5. Top Users
                 top3 = await conn.fetch("""
                     SELECT anonymous_name, session_upload_count 
                     FROM users 
                     WHERE session_upload_count > 0 AND status != 'banned'
                     ORDER BY session_upload_count DESC LIMIT 3
                 """)
-                
-                unsolved_reports = await conn.fetchval("SELECT COUNT(*) FROM reports WHERE solved = FALSE") or 0
-                
-                joined_today = await conn.fetchval(
-                    "SELECT COUNT(*) FROM users WHERE joined_at > NOW() - INTERVAL '24 hours'"
-                ) or 0
-                joined_7d = await conn.fetchval(
-                    "SELECT COUNT(*) FROM users WHERE joined_at > NOW() - INTERVAL '7 days'"
-                ) or 0
+
+                active_count = user_stats['active_count'] or 0
 
                 return {
-                    'total': total_all,
-                    'total_users': total_users,
+                    'total': (user_stats['total_users'] or 0) + unverified,
+                    'total_users': user_stats['total_users'] or 0,
                     'active': active_count,
-                    'inactive': inactive_count,
-                    'pending': pending_count,
-                    'banned': banned_count,
-                    'blocked_bot': blocked_count,
+                    'inactive': user_stats['inactive_count'] or 0,
+                    'pending': user_stats['pending_count'] or 0,
+                    'banned': user_stats['banned_count'] or 0,
+                    'blocked_bot': user_stats['blocked_count'] or 0,
                     'unverified': unverified,
-                    'active_24h': int(active_24h),
-                    'joined_today': int(joined_today),
-                    'joined_7d': int(joined_7d),
-                    'total_exp': await conn.fetchval("SELECT COALESCE(SUM(exp), 0) FROM users") or 0,
-                    'in_queue': int(in_queue),
-                    'sent_today': int(sent_today),
+                    'active_24h': int(user_stats['active_24h'] or 0),
+                    'joined_today': int(user_stats['joined_today'] or 0),
+                    'joined_7d': int(user_stats['joined_7d'] or 0),
+                    'total_exp': user_stats['total_exp'] or 0,
+                    'in_queue': int(media_stats['in_queue'] or 0),
+                    'sent_today': int(media_stats['sent_today'] or 0),
                     'session': dict(session) if session else {},
                     'session_total': int(session_total),
                     'top3': [dict(u) for u in top3],
@@ -767,7 +831,7 @@ async def get_advanced_stats(pool: asyncpg.Pool) -> dict:
         logger.error("Timeout fetching advanced stats from database")
         return {'status': 'timeout', 'error': 'Database timeout'}
     except Exception as e:
-        logger.error(f"Error fetching advanced stats: {e}")
+        logger.error(f"Error fetching advanced stats: {repr(e)}")
         return {'status': 'error', 'error': str(e)}
 
 
@@ -789,7 +853,7 @@ async def get_unsolved_reports(
                     limit, offset
                 )
     except Exception as e:
-        logger.error(f"Error fetching unsolved reports: {e}")
+        logger.error(f"Error fetching unsolved reports: {repr(e)}")
         return []
 
 
@@ -799,7 +863,7 @@ async def count_unsolved_reports(pool: asyncpg.Pool) -> int:
             async with pool.acquire() as conn:
                 return await conn.fetchval("SELECT COUNT(*) FROM reports WHERE solved = FALSE") or 0
     except Exception as e:
-        logger.error(f"Error counting unsolved reports: {e}")
+        logger.error(f"Error counting unsolved reports: {repr(e)}")
         return 0
 
 
@@ -812,7 +876,7 @@ async def solve_report(pool: asyncpg.Pool, report_id: int):
                     report_id
                 )
     except Exception as e:
-        logger.error(f"Error solving report {report_id}: {e}")
+        logger.error(f"Error solving report {report_id}: {repr(e)}")
 
 
 async def ban_user(pool: asyncpg.Pool, user_id: int):
@@ -831,7 +895,7 @@ async def ban_user(pool: asyncpg.Pool, user_id: int):
                         user_id
                     )
     except Exception as e:
-        logger.error(f"Error banning user {user_id}: {e}")
+        logger.error(f"Error banning user {user_id}: {repr(e)}")
 
 
 async def unban_user(pool: asyncpg.Pool, user_id: int):
@@ -843,14 +907,14 @@ async def unban_user(pool: asyncpg.Pool, user_id: int):
                     user_id
                 )
     except Exception as e:
-        logger.error(f"Error unbanning user {user_id}: {e}")
+        logger.error(f"Error unbanning user {user_id}: {repr(e)}")
 
 
 async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyncpg.Record]:
     """Atomically fetch and mark media items as claimed in one query.
     Handles media groups by fetching all items in a group if any are due."""
     try:
-        async with asyncio.timeout(30): # Increased timeout for claiming
+        async with asyncio.timeout(60): # Increased timeout to 60s for high load
             async with pool.acquire() as conn:
                 # First, find IDs of media items that are due
                 # Using SKIP LOCKED to avoid waiting for other workers
@@ -895,10 +959,10 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
                     list(ids_to_claim)
                 )
     except asyncio.TimeoutError:
-        logger.error("Timeout claiming broadcasts from database (DB too busy)")
+        logger.error("Timeout claiming broadcasts from database (DB too busy - 60s exceeded)")
         return []
     except Exception as e:
-        logger.error(f"Error claiming broadcasts: {e}")
+        logger.error(f"Error claiming broadcasts: {repr(e)}")
         return []
 
 
@@ -912,7 +976,7 @@ async def mark_media_sent(pool: asyncpg.Pool, media_ids: List[int]):
                     media_ids
                 )
     except Exception as e:
-        logger.error(f"Error marking media as sent {media_ids}: {e}")
+        logger.error(f"Error marking media as sent {media_ids}: {repr(e)}")
 
 
 async def unclaim_broadcast(pool: asyncpg.Pool, media_ids: List[int], delay_seconds: int = 30):
@@ -928,7 +992,7 @@ async def unclaim_broadcast(pool: asyncpg.Pool, media_ids: List[int], delay_seco
                     delay_seconds, media_ids
                 )
     except Exception as e:
-        logger.error(f"Error unclaiming media {media_ids}: {e}")
+        logger.error(f"Error unclaiming media {media_ids}: {repr(e)}")
 
 
 async def get_inactive_users(pool: asyncpg.Pool, cutoff: datetime) -> List[asyncpg.Record]:
@@ -943,7 +1007,7 @@ async def get_inactive_users(pool: asyncpg.Pool, cutoff: datetime) -> List[async
                     cutoff
                 )
     except Exception as e:
-        logger.error(f"Error fetching inactive users: {e}")
+        logger.error(f"Error fetching inactive users: {repr(e)}")
         return []
 
 
@@ -966,7 +1030,7 @@ async def create_report(
                     reporter_id, media_id, uploader_id, uploader_name, media_file_id, media_type
                 )
     except Exception as e:
-        logger.error(f"Error creating report: {e}")
+        logger.error(f"Error creating report: {repr(e)}")
         raise
 
 
@@ -979,7 +1043,7 @@ async def set_report_admin_message(pool: asyncpg.Pool, report_id: int, msg_id: i
                     report_id, msg_id
                 )
     except Exception as e:
-        logger.error(f"Error setting report admin message: {e}")
+        logger.error(f"Error setting report admin message: {repr(e)}")
 
 
 async def end_session(
@@ -1120,7 +1184,7 @@ async def create_new_session(pool: asyncpg.Pool) -> asyncpg.Record:
                         next_number
                     )
     except Exception as e:
-        logger.error(f"Error creating new session: {e}")
+        logger.error(f"Error creating new session: {repr(e)}")
         raise
 
 
@@ -1146,7 +1210,7 @@ async def get_session_stats(pool: asyncpg.Pool) -> dict:
                     'top_user': dict(top_user) if top_user else None,
                 }
     except Exception as e:
-        logger.error(f"Error fetching session stats: {e}")
+        logger.error(f"Error fetching session stats: {repr(e)}")
         return {}
 
 
@@ -1166,7 +1230,7 @@ async def store_sent_message(
                     recipient_id, message_id, session_id, media_id
                 )
     except Exception as e:
-        logger.error(f"Error storing sent message: {e}")
+        logger.error(f"Error storing sent message: {repr(e)}")
 
 
 async def store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple]):
@@ -1181,7 +1245,7 @@ async def store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple]):
                     batch
                 )
     except Exception as e:
-        logger.error(f"Error storing sent messages batch: {e}")
+        logger.error(f"Error storing sent messages batch: {repr(e)}")
 
 
 async def get_session_sent_messages(pool: asyncpg.Pool, session_id: int) -> List[asyncpg.Record]:
@@ -1193,7 +1257,7 @@ async def get_session_sent_messages(pool: asyncpg.Pool, session_id: int) -> List
                     session_id
                 )
     except Exception as e:
-        logger.error(f"Error fetching session messages: {e}")
+        logger.error(f"Error fetching session messages: {repr(e)}")
         return []
 
 
@@ -1209,7 +1273,7 @@ async def get_session_sent_messages_batch(
                     session_id, limit, offset
                 )
     except Exception as e:
-        logger.error(f"Error fetching session messages batch: {e}")
+        logger.error(f"Error fetching session messages batch: {repr(e)}")
         return []
 
 
@@ -1224,7 +1288,7 @@ async def delete_sent_messages_batch(pool: asyncpg.Pool, ids: List[int]):
                     ids
                 )
     except Exception as e:
-        logger.error(f"Error deleting messages batch: {e}")
+        logger.error(f"Error deleting messages batch: {repr(e)}")
 
 
 async def clear_sent_messages(pool: asyncpg.Pool, session_id: int):
@@ -1236,7 +1300,7 @@ async def clear_sent_messages(pool: asyncpg.Pool, session_id: int):
                     session_id
                 )
     except Exception as e:
-        logger.error(f"Error clearing session messages: {e}")
+        logger.error(f"Error clearing session messages: {repr(e)}")
 
 
 async def get_wipe_stats(pool: asyncpg.Pool) -> dict:
@@ -1280,7 +1344,7 @@ async def get_wipe_stats(pool: asyncpg.Pool) -> dict:
         logger.error("Timeout fetching wipe stats from database")
         return {'status': 'timeout', 'error': 'Database timeout'}
     except Exception as e:
-        logger.error(f"Error fetching wipe stats: {e}")
+        logger.error(f"Error fetching wipe stats: {repr(e)}")
         return {'status': 'error', 'error': str(e)}
 
 

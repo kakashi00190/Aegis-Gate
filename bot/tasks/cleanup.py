@@ -46,7 +46,7 @@ async def _delete_one_message(
         except (TelegramBadRequest, TelegramForbiddenError):
             return False
         except Exception as e:
-            logger.error(f"Cleanup error for user {chat_id}: {e}")
+            logger.error(f"Cleanup error for user {chat_id}: {repr(e)}")
             return False
 
 
@@ -59,7 +59,7 @@ async def _count_total_messages(pool: asyncpg.Pool, session_id: int) -> int:
                     session_id
                 ) or 0
     except Exception as e:
-        logger.error(f"Error counting messages for cleanup: {e}")
+        logger.error(f"Error counting messages for cleanup: {repr(e)}")
         return 0
 
 
@@ -395,7 +395,7 @@ async def cleanup_stale_verifications_task(pool: asyncpg.Pool):
                 if deleted != "DELETE 0":
                     logger.info(f"Cleaned up stale verifications: {deleted}")
         except Exception as e:
-            logger.error(f"Error in cleanup_stale_verifications_task: {e}")
+            logger.error(f"Error in cleanup_stale_verifications_task: {repr(e)}")
 
 
 async def _count_all_messages(pool: asyncpg.Pool) -> int:

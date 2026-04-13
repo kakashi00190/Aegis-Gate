@@ -136,9 +136,9 @@ async def run_health_server(pool):
                             if not ws.closed:
                                 await ws.send_str(data)
                         except Exception as e:
-                            logger.debug(f"Error sending to WS client: {e}")
+                            logger.debug(f"Error sending to WS client: {repr(e)}")
                 except Exception as e:
-                    logger.error(f"Error in stats broadcast loop: {e}")
+                    logger.error(f"Error in stats broadcast loop: {repr(e)}")
 
         asyncio.create_task(broadcast_stats())
         
@@ -156,8 +156,8 @@ async def main():
 
     pool = await asyncpg.create_pool(
         config.DATABASE_URL,
-        min_size=5,
-        max_size=40, # Increased to 40 to handle more concurrent requests
+        min_size=2,
+        max_size=20, # Reduced to 20 to avoid Supabase free tier limits
         command_timeout=60,
         statement_cache_size=0,
         max_inactive_connection_lifetime=300.0,

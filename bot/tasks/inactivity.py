@@ -45,4 +45,4 @@ async def check_inactivity(bot: Bot, pool: asyncpg.Pool):
                 logger.info(f"Marked {len(kicked)} users inactive.")
 
         except Exception as e:
-            logger.error(f"Inactivity check error: {e}")
+            logger.error(f"Inactivity check error: {repr(e)}")

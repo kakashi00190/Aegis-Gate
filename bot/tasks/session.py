@@ -77,4 +77,4 @@ async def check_session_end(bot: Bot, pool: asyncpg.Pool):
                 )
 
         except Exception as e:
-            logger.error(f"Session check error: {e}")
+            logger.error(f"Session check error: {repr(e)}")

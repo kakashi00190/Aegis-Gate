@@ -31,13 +31,13 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
                     batch
                 )
     except Exception as e:
-        logger.error(f"Error in _local_store_sent_messages_batch: {e}")
+        logger.error(f"Error in _local_store_sent_messages_batch: {repr(e)}")
 
-SEND_CONCURRENCY = 30
+SEND_CONCURRENCY = 15
 SEND_DELAY_BASE = 0.05
-BATCH_SIZE = 20
+BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 100
+CHUNK_SIZE = 20
 
 _active_users_cache = {
     'users': [],
@@ -73,14 +73,25 @@ async def sent_messages_logger_task(pool: asyncpg.Pool):
                 last_flush = now
                 
         except Exception as e:
-            logger.error(f"Error in sent_messages_logger_task: {e}")
+            logger.error(f"Error in sent_messages_logger_task: {repr(e)}")
             await asyncio.sleep(1)
 
 async def get_cached_active_users(pool: asyncpg.Pool):
     now = time.monotonic()
     if now - _active_users_cache['timestamp'] > CACHE_TTL:
-        _active_users_cache['users'] = await get_all_active_users(pool)
-        _active_users_cache['timestamp'] = now
+        try:
+            users = await get_all_active_users(pool)
+            if users: # Only update if we actually got users
+                _active_users_cache['users'] = users
+                _active_users_cache['timestamp'] = now
+            elif not _active_users_cache['users']:
+                # If cache is empty and DB returns empty, update timestamp to avoid hammering
+                _active_users_cache['timestamp'] = now
+        except Exception as e:
+            logger.error(f"Error updating active users cache: {repr(e)}")
+            # Keep using old cache even if it's expired
+            _active_users_cache['timestamp'] = now - (CACHE_TTL / 2) # Retry sooner
+            
     return _active_users_cache['users']
 
 
@@ -156,7 +167,7 @@ async def send_media_to_user(
                 await mark_user_blocked(pool, user_id)
                 return False
             
-            logger.error(f"Error sending to {user_id}: {e}")
+            logger.error(f"Error sending to {user_id}: {repr(e)}")
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(1)
@@ -289,5 +300,5 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as e:
-            logger.error(f"Broadcast queue error: {e}")
+            logger.error(f"Broadcast queue error: {repr(e)}")
             await asyncio.sleep(5)

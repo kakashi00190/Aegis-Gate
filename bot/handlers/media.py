@@ -7,7 +7,7 @@ import asyncpg
 from database import (
     get_user, get_config, get_current_session, is_session_paused,
     add_media, update_user_on_upload, activate_user, reactivate_user,
-    increment_inactive_uploads
+    increment_inactive_uploads, get_upload_context
 )
 from utils.helpers import contains_link, format_timedelta_until
 from config import ADMIN_ID
@@ -48,9 +48,36 @@ def _cleanup_cooldowns(cooldowns: dict, ttl: int = COOLDOWN_TTL):
     'animation', 'sticker', 'video_note'
 }))
 async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
+    # 1. Rate Limiting Check
     user_id = message.from_user.id
+    now_ts = time.time()
+    user_uploads = _upload_cooldowns.get(user_id, [])
+    # Keep only uploads within the last WINDOW_SECONDS
+    user_uploads = [ts for ts in user_uploads if now_ts - ts < WINDOW_SECONDS]
+    
+    if len(user_uploads) >= MAX_UPLOADS_PER_WINDOW:
+        # Too many uploads, ignore silently or send a warning once
+        if len(user_uploads) == MAX_UPLOADS_PER_WINDOW:
+            await message.answer(
+                "⚠️ <b>Slow down!</b> You are uploading too fast.\n"
+                "Please wait a few seconds.",
+                parse_mode="HTML"
+            )
+        return
+    
+    user_uploads.append(now_ts)
+    _upload_cooldowns[user_id] = user_uploads
 
-    user = await get_user(pool, user_id)
+    # 2. Get User, Session, and Config in ONE optimized call
+    context = await get_upload_context(pool, user_id)
+    if not context['success']:
+        await message.answer("⚠️ Database is busy. Please try again in a moment.")
+        return
+
+    user = context['user']
+    session = context['session']
+    config = context['config']
+
     if not user:
         await message.answer("⚠️ You are not registered. Use /start to begin.")
         return
@@ -74,13 +101,25 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         )
         return
 
-    paused, pause_until = await is_session_paused(pool)
+    # 3. Check Session Status
+    # is_session_paused still uses the DB, but we already have the session object!
+    # Let's check pause status locally if possible.
+    paused = False
+    pause_until = None
+    if session and session['pause_until']:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        pause_until = session['pause_until']
+        if pause_until.tzinfo is None:
+            pause_until = pause_until.replace(tzinfo=timezone.utc)
+        if now < pause_until:
+            paused = True
+
     if paused and not is_admin(user_id):
         try:
             await message.delete()
         except Exception:
             pass
-        now_ts = time.time()
         _cleanup_cooldowns(_pause_cooldowns)
         if now_ts - _pause_cooldowns.get(user_id, 0) > 60:
             _pause_cooldowns[user_id] = now_ts
@@ -116,19 +155,18 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         file_unique_id = message.document.file_unique_id
         media_type = 'document'
 
-    config = await get_config(pool)
+    if not session:
+        await message.answer("⚠️ No active session. Please try again later.")
+        return
+
     activation_threshold = int(config.get('activation_threshold', '10'))
     reactivation_threshold = int(config.get('reactivation_threshold', '3'))
     delay = int(config.get('broadcast_delay_seconds', '30'))
 
-    session = await get_current_session(pool)
-    if not session:
-        await message.answer("⚠️ No active session. Please try again later.")
-        return
     session_id = session['id']
     media_group_id = message.media_group_id
 
-    # Silent EXP update
+    # 5. Atomic Update and Save
     stats = await update_user_on_upload(pool, user_id)
     if not stats:
         return
