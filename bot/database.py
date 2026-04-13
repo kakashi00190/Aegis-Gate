@@ -143,15 +143,25 @@ async def set_config(pool: asyncpg.Pool, key: str, value: str):
 
 
 async def get_user(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]:
-    async with pool.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                return await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+    except Exception as e:
+        logger.error(f"Error fetching user {user_id}: {e}")
+        return None
 
 
 async def get_user_by_name(pool: asyncpg.Pool, name: str) -> Optional[asyncpg.Record]:
-    async with pool.acquire() as conn:
-        return await conn.fetchrow(
-            "SELECT * FROM users WHERE LOWER(anonymous_name) = LOWER($1)", name
-        )
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                return await conn.fetchrow(
+                    "SELECT * FROM users WHERE LOWER(anonymous_name) = LOWER($1)", name
+                )
+    except Exception as e:
+        logger.error(f"Error fetching user by name {name}: {e}")
+        return None
 
 
 async def get_user_by_id_or_name(pool: asyncpg.Pool, query: str) -> Optional[asyncpg.Record]:
