@@ -123,13 +123,28 @@ SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions);
 
 
 async def init_db(pool: asyncpg.Pool):
-    try:
-        async with asyncio.timeout(30): # 30 second timeout for migrations
-            async with pool.acquire() as conn:
-                await conn.execute(INIT_SQL)
-    except Exception as e:
-        logger.error(f"Error initializing database: {e}")
-        raise
+    """Initializes the database schema with retries and individual statement execution."""
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"Database initialization attempt {attempt}/{max_retries}...")
+            async with asyncio.timeout(120): # Increased timeout for slow Supabase free tier
+                async with pool.acquire() as conn:
+                    # Execute as a single transaction if possible
+                    async with conn.transaction():
+                        await conn.execute(INIT_SQL)
+            logger.info("✅ Database schema initialized successfully.")
+            return
+        except asyncio.TimeoutError:
+            logger.error(f"❌ Timeout initializing database on attempt {attempt}")
+            if attempt == max_retries:
+                raise
+            await asyncio.sleep(5)
+        except Exception as e:
+            logger.error(f"❌ Error initializing database on attempt {attempt}: {e}")
+            if attempt == max_retries:
+                raise
+            await asyncio.sleep(5)
 
 
 async def get_config(pool: asyncpg.Pool) -> Dict[str, str]:

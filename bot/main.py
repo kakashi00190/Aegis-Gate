@@ -94,6 +94,7 @@ async def run_health_server(pool):
     port = int(os.environ.get("PORT", 8080))
     app = web.Application()
     app['pool'] = pool
+    app.router.add_get("/", health_handler) # Handle root for Render's default health check
     app.router.add_get("/api/healthz", health_handler)
     app.router.add_get("/healthz", health_handler)
     app.router.add_get("/api/health", detailed_health_handler)
