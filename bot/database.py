@@ -846,7 +846,7 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
     """Atomically fetch and mark media items as claimed in one query.
     Handles media groups by fetching all items in a group if any are due."""
     try:
-        async with asyncio.timeout(15):
+        async with asyncio.timeout(30): # Increased timeout for claiming
             async with pool.acquire() as conn:
                 # First, find IDs of media items that are due
                 # Using SKIP LOCKED to avoid waiting for other workers
@@ -869,6 +869,7 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
                 group_ids = {row['media_group_id'] for row in due_ids if row['media_group_id']}
                 
                 if group_ids:
+                    # Execute this in the same transaction to keep it safe
                     extra_ids = await conn.fetch(
                         "SELECT id FROM media WHERE media_group_id = ANY($1) AND sent_at IS NULL",
                         list(group_ids)
@@ -890,7 +891,7 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
                     list(ids_to_claim)
                 )
     except asyncio.TimeoutError:
-        logger.error("Timeout claiming broadcasts from database")
+        logger.error("Timeout claiming broadcasts from database (DB too busy)")
         return []
     except Exception as e:
         logger.error(f"Error claiming broadcasts: {e}")

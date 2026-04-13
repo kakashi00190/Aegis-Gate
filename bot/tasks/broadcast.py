@@ -258,16 +258,17 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 await asyncio.sleep(10)
                 continue
 
-            raw_items = await claim_due_broadcasts(pool, limit=BATCH_SIZE)
+            # Limit how many items we process at once to avoid DB/Network overload
+            raw_items = await claim_due_broadcasts(pool, limit=10) # Reduced from BATCH_SIZE (20)
             if not raw_items:
                 # Periodic status log even if no items
                 now = time.monotonic()
                 if now - last_status_log > 300: # Log every 5 mins
-                    config = await get_config(pool)
-                    delay = config.get('broadcast_delay_seconds', '30')
+                    config_data = await get_config(pool)
+                    delay = config_data.get('broadcast_delay_seconds', '30')
                     logger.info(f"Broadcast queue: {len(recipients)} recipients, but no items due. (Delay: {delay}s)")
                     last_status_log = now
-                await asyncio.sleep(1)
+                await asyncio.sleep(2) # Wait slightly longer
                 continue
 
             logger.info(f"Claimed {len(raw_items)} media items for broadcast to {len(recipients)} potential recipients.")
