@@ -51,11 +51,16 @@ async def _delete_one_message(
 
 
 async def _count_total_messages(pool: asyncpg.Pool, session_id: int) -> int:
-    async with pool.acquire() as conn:
-        return await conn.fetchval(
-            "SELECT COUNT(*) FROM sent_messages WHERE session_id = $1",
-            session_id
-        ) or 0
+    try:
+        async with asyncio.timeout(15):
+            async with pool.acquire() as conn:
+                return await conn.fetchval(
+                    "SELECT COUNT(*) FROM sent_messages WHERE session_id = $1",
+                    session_id
+                ) or 0
+    except Exception as e:
+        logger.error(f"Error counting messages for cleanup: {e}")
+        return 0
 
 
 def generate_progress_bar(pct: int, length: int = 15) -> str:

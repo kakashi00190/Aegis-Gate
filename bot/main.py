@@ -164,6 +164,10 @@ async def main():
     )
     logger.info("Database pool created.")
 
+    # Start health server early so Render's health check passes while DB initializes
+    loop = asyncio.get_running_loop()
+    loop.create_task(run_health_server(pool))
+
     await init_db(pool)
     logger.info("Database initialized.")
 
@@ -181,7 +185,6 @@ async def main():
     dp.include_router(admin.router)
 
     loop = asyncio.get_running_loop()
-    loop.create_task(run_health_server(pool))
     loop.create_task(process_broadcast_queue(bot, pool))
     loop.create_task(sent_messages_logger_task(pool))
     loop.create_task(check_inactivity(bot, pool))

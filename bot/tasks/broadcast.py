@@ -22,12 +22,16 @@ from utils.limiter import global_rate_limiter
 async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple]):
     if not batch:
         return
-    async with pool.acquire() as conn:
-        await conn.executemany(
-            "INSERT INTO sent_messages (recipient_id, message_id, session_id, media_id) "
-            "VALUES ($1, $2, $3, $4)",
-            batch
-        )
+    try:
+        async with asyncio.timeout(20):
+            async with pool.acquire() as conn:
+                await conn.executemany(
+                    "INSERT INTO sent_messages (recipient_id, message_id, session_id, media_id) "
+                    "VALUES ($1, $2, $3, $4)",
+                    batch
+                )
+    except Exception as e:
+        logger.error(f"Error in _local_store_sent_messages_batch: {e}")
 
 SEND_CONCURRENCY = 30
 SEND_DELAY_BASE = 0.05
