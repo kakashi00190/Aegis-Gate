@@ -198,9 +198,13 @@ async def main():
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    except Exception as e:
+        logger.error(f"Polling error: {repr(e)}")
     finally:
-        await pool.close()
+        logger.info("Closing bot resources...")
         await bot.session.close()
+        await pool.close()
+        logger.info("Shutdown complete.")
 
 
 if __name__ == "__main__":

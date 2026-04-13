@@ -300,72 +300,90 @@ async def get_user(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]
 
 
 async def get_upload_context(pool: asyncpg.Pool, user_id: int) -> dict:
-    """Fetches user, current session, and config in a single optimized block for uploads."""
-    try:
-        async with asyncio.timeout(15):
-            async with pool.acquire() as conn:
-                user_task = conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
-                session_task = conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
-                config_task = conn.fetch("SELECT key, value FROM admin_config")
-                
-                user, session, config_rows = await asyncio.gather(user_task, session_task, config_task)
-                
-                config = {row['key']: row['value'] for row in config_rows}
-                return {
-                    'user': user,
-                    'session': session,
-                    'config': config,
-                    'success': True
-                }
-    except Exception as e:
-        logger.error(f"Error fetching upload context for {user_id}: {repr(e)}")
-        return {'success': False, 'error': str(e)}
+    """Fetches user, current session, and config with retries."""
+    for attempt in range(1, 4):
+        try:
+            async with asyncio.timeout(15):
+                async with pool.acquire() as conn:
+                    user_task = conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+                    session_task = conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
+                    config_task = conn.fetch("SELECT key, value FROM admin_config")
+                    
+                    user, session, config_rows = await asyncio.gather(user_task, session_task, config_task)
+                    
+                    config = {row['key']: row['value'] for row in config_rows}
+                    return {
+                        'user': user,
+                        'session': session,
+                        'config': config,
+                        'success': True
+                    }
+        except Exception as e:
+            if attempt < 3:
+                logger.warning(f"Retry {attempt} for upload context {user_id}: {repr(e)}")
+                await asyncio.sleep(1)
+                continue
+            logger.error(f"Final error fetching upload context for {user_id}: {repr(e)}")
+            return {'success': False, 'error': str(e)}
+    return {'success': False, 'error': 'Max retries reached'}
 
 
 async def get_start_context(pool: asyncpg.Pool, user_id: int) -> dict:
-    """Fetches user, pending verification, current session, and config in a single optimized block for /start."""
-    try:
-        async with asyncio.timeout(15):
-            async with pool.acquire() as conn:
-                user_task = conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
-                pending_task = conn.fetchrow("SELECT * FROM pending_verifications WHERE user_id = $1", user_id)
-                session_task = conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
-                config_task = conn.fetch("SELECT key, value FROM admin_config")
-                
-                user, pending, session, config_rows = await asyncio.gather(user_task, pending_task, session_task, config_task)
-                
-                config = {row['key']: row['value'] for row in config_rows}
-                return {
-                    'user': user,
-                    'pending': pending,
-                    'session': session,
-                    'config': config,
-                    'success': True
-                }
-    except Exception as e:
-        logger.error(f"Error fetching start context for {user_id}: {repr(e)}")
-        return {'success': False, 'error': str(e)}
+    """Fetches user, pending verification, current session, and config with retries."""
+    for attempt in range(1, 4):
+        try:
+            async with asyncio.timeout(15):
+                async with pool.acquire() as conn:
+                    user_task = conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+                    pending_task = conn.fetchrow("SELECT * FROM pending_verifications WHERE user_id = $1", user_id)
+                    session_task = conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
+                    config_task = conn.fetch("SELECT key, value FROM admin_config")
+                    
+                    user, pending, session, config_rows = await asyncio.gather(user_task, pending_task, session_task, config_task)
+                    
+                    config = {row['key']: row['value'] for row in config_rows}
+                    return {
+                        'user': user,
+                        'pending': pending,
+                        'session': session,
+                        'config': config,
+                        'success': True
+                    }
+        except Exception as e:
+            if attempt < 3:
+                logger.warning(f"Retry {attempt} for start context {user_id}: {repr(e)}")
+                await asyncio.sleep(1)
+                continue
+            logger.error(f"Final error fetching start context for {user_id}: {repr(e)}")
+            return {'success': False, 'error': str(e)}
+    return {'success': False, 'error': 'Max retries reached'}
 
 
 async def get_verification_context(pool: asyncpg.Pool, user_id: int) -> dict:
-    """Fetches pending verification and config in a single optimized block for verification."""
-    try:
-        async with asyncio.timeout(15):
-            async with pool.acquire() as conn:
-                pending_task = conn.fetchrow("SELECT * FROM pending_verifications WHERE user_id = $1", user_id)
-                config_task = conn.fetch("SELECT key, value FROM admin_config")
-                
-                pending, config_rows = await asyncio.gather(pending_task, config_task)
-                
-                config = {row['key']: row['value'] for row in config_rows}
-                return {
-                    'pending': pending,
-                    'config': config,
-                    'success': True
-                }
-    except Exception as e:
-        logger.error(f"Error fetching verification context for {user_id}: {repr(e)}")
-        return {'success': False, 'error': str(e)}
+    """Fetches pending verification and config with retries."""
+    for attempt in range(1, 4):
+        try:
+            async with asyncio.timeout(15):
+                async with pool.acquire() as conn:
+                    pending_task = conn.fetchrow("SELECT * FROM pending_verifications WHERE user_id = $1", user_id)
+                    config_task = conn.fetch("SELECT key, value FROM admin_config")
+                    
+                    pending, config_rows = await asyncio.gather(pending_task, config_task)
+                    
+                    config = {row['key']: row['value'] for row in config_rows}
+                    return {
+                        'pending': pending,
+                        'config': config,
+                        'success': True
+                    }
+        except Exception as e:
+            if attempt < 3:
+                logger.warning(f"Retry {attempt} for verification context {user_id}: {repr(e)}")
+                await asyncio.sleep(1)
+                continue
+            logger.error(f"Final error fetching verification context for {user_id}: {repr(e)}")
+            return {'success': False, 'error': str(e)}
+    return {'success': False, 'error': 'Max retries reached'}
 
 
 async def get_user_by_name(pool: asyncpg.Pool, name: str) -> Optional[asyncpg.Record]:
