@@ -123,12 +123,10 @@ SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions);
 
 
 async def init_db(pool: asyncpg.Pool):
-    """Initializes the database schema by executing statements individually.
-    Handles large tables and slow migrations by logging progress and using per-statement timeouts."""
+    """Initializes the database schema by checking existence first to avoid slow CREATE TABLE calls."""
     
-    statements = [
-        # 1. Base Tables
-        """CREATE TABLE IF NOT EXISTS users (
+    table_checks = [
+        ('users', """CREATE TABLE IF NOT EXISTS users (
             id BIGINT PRIMARY KEY,
             anonymous_name TEXT UNIQUE NOT NULL,
             status TEXT DEFAULT 'pending',
@@ -141,17 +139,15 @@ async def init_db(pool: asyncpg.Pool):
             bot_blocked BOOLEAN DEFAULT FALSE,
             last_activity_at TIMESTAMP WITH TIME ZONE,
             joined_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        )""",
-        
-        """CREATE TABLE IF NOT EXISTS sessions (
+        )"""),
+        ('sessions', """CREATE TABLE IF NOT EXISTS sessions (
             id SERIAL PRIMARY KEY,
             session_number INTEGER UNIQUE NOT NULL,
             started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             ended_at TIMESTAMP WITH TIME ZONE,
             pause_until TIMESTAMP WITH TIME ZONE
-        )""",
-        
-        """CREATE TABLE IF NOT EXISTS media (
+        )"""),
+        ('media', """CREATE TABLE IF NOT EXISTS media (
             id SERIAL PRIMARY KEY,
             user_id BIGINT REFERENCES users(id),
             session_id INTEGER REFERENCES sessions(id),
@@ -163,9 +159,8 @@ async def init_db(pool: asyncpg.Pool):
             sent_at TIMESTAMP WITH TIME ZONE,
             claimed_at TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        )""",
-        
-        """CREATE TABLE IF NOT EXISTS reports (
+        )"""),
+        ('reports', """CREATE TABLE IF NOT EXISTS reports (
             id SERIAL PRIMARY KEY,
             reporter_id BIGINT REFERENCES users(id),
             media_id INTEGER,
@@ -177,54 +172,37 @@ async def init_db(pool: asyncpg.Pool):
             solved BOOLEAN DEFAULT FALSE,
             solved_at TIMESTAMP WITH TIME ZONE,
             admin_message_id INTEGER
-        )""",
-        
-        """CREATE TABLE IF NOT EXISTS sent_messages (
+        )"""),
+        ('sent_messages', """CREATE TABLE IF NOT EXISTS sent_messages (
             id SERIAL PRIMARY KEY,
             recipient_id BIGINT NOT NULL,
             message_id BIGINT NOT NULL,
             session_id INTEGER NOT NULL,
             media_id INTEGER REFERENCES media(id) ON DELETE SET NULL,
             sent_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        )""",
-        
-        """CREATE TABLE IF NOT EXISTS pending_verifications (
+        )"""),
+        ('pending_verifications', """CREATE TABLE IF NOT EXISTS pending_verifications (
             user_id BIGINT PRIMARY KEY,
             answer INTEGER NOT NULL,
             reserved_name TEXT NOT NULL,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        )""",
-        
-        """CREATE TABLE IF NOT EXISTS admin_config (
+        )"""),
+        ('admin_config', """CREATE TABLE IF NOT EXISTS admin_config (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
-        )""",
-        
-        # 2. Schema Migrations (ALTERs and Constraints)
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_blocked BOOLEAN DEFAULT FALSE",
-        "ALTER TABLE media ADD COLUMN IF NOT EXISTS media_group_id TEXT",
-        "ALTER TABLE media ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE",
-        "ALTER TABLE sent_messages ADD COLUMN IF NOT EXISTS media_id INTEGER REFERENCES media(id) ON DELETE SET NULL",
-        
-        # 3. Indices (Fast if IF NOT EXISTS)
-        "CREATE INDEX IF NOT EXISTS idx_media_queue ON media(scheduled_at) WHERE sent_at IS NULL AND scheduled_at IS NOT NULL",
-        "CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)",
-        "CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_activity_at) WHERE status = 'active'",
-        "CREATE INDEX IF NOT EXISTS idx_sent_messages_session ON sent_messages(session_id)",
-        "CREATE INDEX IF NOT EXISTS idx_sent_messages_recipient ON sent_messages(recipient_id)",
-        
-        # 4. Default Data
-        """INSERT INTO admin_config (key, value) VALUES
-            ('broadcast_delay_seconds', '30'),
-            ('inactivity_minutes', '160'),
-            ('session_duration_days', '7'),
-            ('leaderboard_top', '10'),
-            ('session_pause_hours', '3'),
-            ('activation_threshold', '10'),
-            ('reactivation_threshold', '3')
-        ON CONFLICT (key) DO NOTHING""",
-        
-        "INSERT INTO sessions (session_number) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions)"
+        )""")
+    ]
+
+    migrations = [
+        ("ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_blocked BOOLEAN DEFAULT FALSE", "users_bot_blocked"),
+        ("ALTER TABLE media ADD COLUMN IF NOT EXISTS media_group_id TEXT", "media_group_id"),
+        ("ALTER TABLE media ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE", "media_claimed_at"),
+        ("ALTER TABLE sent_messages ADD COLUMN IF NOT EXISTS media_id INTEGER REFERENCES media(id) ON DELETE SET NULL", "sent_messages_media_id"),
+        ("CREATE INDEX IF NOT EXISTS idx_media_queue ON media(scheduled_at) WHERE sent_at IS NULL AND scheduled_at IS NOT NULL", "idx_media_queue"),
+        ("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)", "idx_users_status"),
+        ("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_activity_at) WHERE status = 'active'", "idx_users_activity"),
+        ("CREATE INDEX IF NOT EXISTS idx_sent_messages_session ON sent_messages(session_id)", "idx_sent_messages_session"),
+        ("CREATE INDEX IF NOT EXISTS idx_sent_messages_recipient ON sent_messages(recipient_id)", "idx_sent_messages_recipient")
     ]
 
     max_retries = 3
@@ -232,24 +210,49 @@ async def init_db(pool: asyncpg.Pool):
         try:
             logger.info(f"Database initialization attempt {attempt}/{max_retries}...")
             async with pool.acquire() as conn:
-                for i, stmt in enumerate(statements):
-                    stmt_label = stmt.strip().split('\n')[0][:50] + "..."
+                # 1. Check and Create Tables
+                for table_name, create_stmt in table_checks:
                     try:
-                        async with asyncio.timeout(60): # 60s per statement
-                            await conn.execute(stmt)
-                        if i % 5 == 0 or i == len(statements) - 1:
-                            logger.info(f"  [{i+1}/{len(statements)}] Executed: {stmt_label}")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"  ⚠️ Statement timed out (skipping): {stmt_label}")
-                        continue # Move to next statement
+                        async with asyncio.timeout(10):
+                            exists = await conn.fetchval(
+                                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)",
+                                table_name
+                            )
+                            if not exists:
+                                logger.info(f"  Creating table: {table_name}")
+                                await conn.execute(create_stmt)
                     except Exception as e:
-                        # For ALTERs, if it fails because it already exists (redundant with IF NOT EXISTS but safe to catch)
-                        if "already exists" in str(e).lower():
-                            continue
-                        logger.error(f"  ❌ Error executing statement {i+1}: {e}")
-                        # Keep going if it's just a migration that failed
-                        if i < 7: # Core tables must succeed
-                            raise
+                        logger.warning(f"  ⚠️ Table check/create failed for {table_name}: {e}")
+
+                # 2. Run Migrations
+                for stmt, label in migrations:
+                    try:
+                        async with asyncio.timeout(15):
+                            await conn.execute(stmt)
+                    except Exception as e:
+                        if "already exists" not in str(e).lower():
+                            logger.warning(f"  ⚠️ Migration failed ({label}): {e}")
+
+                # 3. Seed Default Data
+                try:
+                    async with asyncio.timeout(10):
+                        await conn.execute("""
+                            INSERT INTO admin_config (key, value) VALUES
+                                ('broadcast_delay_seconds', '30'),
+                                ('inactivity_minutes', '160'),
+                                ('session_duration_days', '7'),
+                                ('leaderboard_top', '10'),
+                                ('session_pause_hours', '3'),
+                                ('activation_threshold', '10'),
+                                ('reactivation_threshold', '3')
+                            ON CONFLICT (key) DO NOTHING
+                        """)
+                        await conn.execute(
+                            "INSERT INTO sessions (session_number) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions)"
+                        )
+                except Exception as e:
+                    logger.warning(f"  ⚠️ Seeding data failed: {e}")
+
             logger.info("✅ Database schema initialization complete.")
             return
         except Exception as e:
@@ -985,13 +988,12 @@ async def end_session(
     leaderboard_top: int,
     progress_callback: Optional[Callable[[str, int], Coroutine]] = None
 ) -> Optional[dict]:
-    """Ends a session, handles badges, and cleans up data.
-    Uses smaller transactions and chunked operations to prevent long-held locks."""
+    """Ends a session, handles badges, and cleans up data in manageable chunks."""
     
     # 1. Close session record first (short transaction)
     async with pool.acquire() as conn:
         if progress_callback:
-            await progress_callback("Closing session record...", 10)
+            await progress_callback("Closing session record...", 5)
         
         ended_session = await conn.fetchrow(
             "UPDATE sessions SET ended_at = NOW(), pause_until = NOW() + make_interval(hours => $1) "
@@ -1001,10 +1003,10 @@ async def end_session(
         if not ended_session:
             return None
 
-    # 2. Process badges (outside main transaction if possible, or in its own)
+    # 2. Process badges
     async with pool.acquire() as conn:
         if progress_callback:
-            await progress_callback("Fetching top uploaders...", 25)
+            await progress_callback("Fetching top uploaders...", 15)
 
         top_users = await conn.fetch(
             """SELECT * FROM users
@@ -1020,8 +1022,8 @@ async def end_session(
             rank = i + 1
             badge = badge_for_rank(rank)
             if badge:
-                if progress_callback:
-                    pct = 30 + int((i / num_top) * 30)
+                if progress_callback and i % 5 == 0:
+                    pct = 15 + int((i / num_top) * 20)
                     await progress_callback(f"Distributing badges ({rank}/{num_top})...", pct)
                 
                 existing = user['badge_emoji'] or ''
@@ -1036,42 +1038,59 @@ async def end_session(
                     'badge': badge
                 })
 
-    # 3. Cleanup session media in chunks (crucial for large sessions)
+    # 3. Cleanup session media in CHUNKS to avoid massive table locking
     async with pool.acquire() as conn:
         if progress_callback:
-            await progress_callback("Cleaning up session media...", 70)
+            await progress_callback("Preparing media cleanup...", 40)
         
-        # Instead of one big DELETE, do it in chunks if possible, 
-        # but for media it's usually okay to delete by session_id 
-        # unless we have millions of rows.
-        await conn.execute("DELETE FROM media WHERE session_id = $1", session_id)
+        total_media = await conn.fetchval("SELECT COUNT(*) FROM media WHERE session_id = $1", session_id) or 0
+        deleted_media = 0
         
-    # 4. Reset upload counts and update activity status
-    async with pool.acquire() as conn:
-        if progress_callback:
-            await progress_callback("Updating user activity status...", 85)
+        while True:
+            # Delete in batches of 500
+            res = await conn.execute(
+                "DELETE FROM media WHERE id IN (SELECT id FROM media WHERE session_id = $1 LIMIT 500)", 
+                session_id
+            )
+            count = int(res.split()[-1])
+            if count == 0:
+                break
+            deleted_media += count
+            if progress_callback and total_media > 0:
+                pct = 40 + int((deleted_media / total_media) * 30)
+                await progress_callback(f"Cleaning up media ({deleted_media}/{total_media})...", pct)
+            await asyncio.sleep(0.1) # Small pause to let other queries in
 
-        await conn.execute("UPDATE users SET session_upload_count = 0")
+    # 4. Reset upload counts and update activity status in chunks
+    async with pool.acquire() as conn:
+        if progress_callback:
+            await progress_callback("Resetting user stats...", 75)
+
+        # Only reset users who actually have uploads to minimize rows affected
+        await conn.execute("UPDATE users SET session_upload_count = 0 WHERE session_upload_count > 0")
         
         # Identify top 10% of active users
         total_active = await conn.fetchval("SELECT COUNT(*) FROM users WHERE status = 'active'") or 0
         top_10_percent_limit = max(1, total_active // 10) if total_active > 0 else 0
         
-        # Set all active to inactive
-        await conn.execute(
-            "UPDATE users SET status = 'inactive', uploads_since_inactive = 0 WHERE status = 'active'"
-        )
-        
+        if progress_callback:
+            await progress_callback("Updating activity status...", 85)
+
+        # Reset status for all active users EXCEPT the top 10%
         if top_10_percent_limit > 0:
-            # Restore top 10%
             await conn.execute(
-                """UPDATE users SET status = 'active' 
-                   WHERE id IN (
+                """WITH top_ids AS (
                        SELECT id FROM users 
                        ORDER BY total_media_lifetime DESC 
                        LIMIT $1
-                   )""",
+                   )
+                   UPDATE users SET status = 'inactive', uploads_since_inactive = 0 
+                   WHERE status = 'active' AND id NOT IN (SELECT id FROM top_ids)""",
                 top_10_percent_limit
+            )
+        else:
+            await conn.execute(
+                "UPDATE users SET status = 'inactive', uploads_since_inactive = 0 WHERE status = 'active'"
             )
 
         if progress_callback:
