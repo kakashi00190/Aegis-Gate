@@ -123,25 +123,137 @@ SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions);
 
 
 async def init_db(pool: asyncpg.Pool):
-    """Initializes the database schema with retries and individual statement execution."""
+    """Initializes the database schema by executing statements individually.
+    Handles large tables and slow migrations by logging progress and using per-statement timeouts."""
+    
+    statements = [
+        # 1. Base Tables
+        """CREATE TABLE IF NOT EXISTS users (
+            id BIGINT PRIMARY KEY,
+            anonymous_name TEXT UNIQUE NOT NULL,
+            status TEXT DEFAULT 'pending',
+            exp INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1,
+            total_media_lifetime INTEGER DEFAULT 0,
+            session_upload_count INTEGER DEFAULT 0,
+            uploads_since_inactive INTEGER DEFAULT 0,
+            badge_emoji TEXT DEFAULT '',
+            bot_blocked BOOLEAN DEFAULT FALSE,
+            last_activity_at TIMESTAMP WITH TIME ZONE,
+            joined_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""",
+        
+        """CREATE TABLE IF NOT EXISTS sessions (
+            id SERIAL PRIMARY KEY,
+            session_number INTEGER UNIQUE NOT NULL,
+            started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            ended_at TIMESTAMP WITH TIME ZONE,
+            pause_until TIMESTAMP WITH TIME ZONE
+        )""",
+        
+        """CREATE TABLE IF NOT EXISTS media (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT REFERENCES users(id),
+            session_id INTEGER REFERENCES sessions(id),
+            file_id TEXT NOT NULL,
+            file_unique_id TEXT,
+            media_type TEXT NOT NULL,
+            media_group_id TEXT,
+            scheduled_at TIMESTAMP WITH TIME ZONE,
+            sent_at TIMESTAMP WITH TIME ZONE,
+            claimed_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""",
+        
+        """CREATE TABLE IF NOT EXISTS reports (
+            id SERIAL PRIMARY KEY,
+            reporter_id BIGINT REFERENCES users(id),
+            media_id INTEGER,
+            uploader_id BIGINT,
+            uploader_name TEXT,
+            media_file_id TEXT,
+            media_type TEXT,
+            reported_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            solved BOOLEAN DEFAULT FALSE,
+            solved_at TIMESTAMP WITH TIME ZONE,
+            admin_message_id INTEGER
+        )""",
+        
+        """CREATE TABLE IF NOT EXISTS sent_messages (
+            id SERIAL PRIMARY KEY,
+            recipient_id BIGINT NOT NULL,
+            message_id BIGINT NOT NULL,
+            session_id INTEGER NOT NULL,
+            media_id INTEGER REFERENCES media(id) ON DELETE SET NULL,
+            sent_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""",
+        
+        """CREATE TABLE IF NOT EXISTS pending_verifications (
+            user_id BIGINT PRIMARY KEY,
+            answer INTEGER NOT NULL,
+            reserved_name TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""",
+        
+        """CREATE TABLE IF NOT EXISTS admin_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )""",
+        
+        # 2. Schema Migrations (ALTERs and Constraints)
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_blocked BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE media ADD COLUMN IF NOT EXISTS media_group_id TEXT",
+        "ALTER TABLE media ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE sent_messages ADD COLUMN IF NOT EXISTS media_id INTEGER REFERENCES media(id) ON DELETE SET NULL",
+        
+        # 3. Indices (Fast if IF NOT EXISTS)
+        "CREATE INDEX IF NOT EXISTS idx_media_queue ON media(scheduled_at) WHERE sent_at IS NULL AND scheduled_at IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)",
+        "CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_activity_at) WHERE status = 'active'",
+        "CREATE INDEX IF NOT EXISTS idx_sent_messages_session ON sent_messages(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_sent_messages_recipient ON sent_messages(recipient_id)",
+        
+        # 4. Default Data
+        """INSERT INTO admin_config (key, value) VALUES
+            ('broadcast_delay_seconds', '30'),
+            ('inactivity_minutes', '160'),
+            ('session_duration_days', '7'),
+            ('leaderboard_top', '10'),
+            ('session_pause_hours', '3'),
+            ('activation_threshold', '10'),
+            ('reactivation_threshold', '3')
+        ON CONFLICT (key) DO NOTHING""",
+        
+        "INSERT INTO sessions (session_number) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions)"
+    ]
+
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"Database initialization attempt {attempt}/{max_retries}...")
-            async with asyncio.timeout(120): # Increased timeout for slow Supabase free tier
-                async with pool.acquire() as conn:
-                    # Execute as a single transaction if possible
-                    async with conn.transaction():
-                        await conn.execute(INIT_SQL)
-            logger.info("✅ Database schema initialized successfully.")
+            async with pool.acquire() as conn:
+                for i, stmt in enumerate(statements):
+                    stmt_label = stmt.strip().split('\n')[0][:50] + "..."
+                    try:
+                        async with asyncio.timeout(60): # 60s per statement
+                            await conn.execute(stmt)
+                        if i % 5 == 0 or i == len(statements) - 1:
+                            logger.info(f"  [{i+1}/{len(statements)}] Executed: {stmt_label}")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"  ⚠️ Statement timed out (skipping): {stmt_label}")
+                        continue # Move to next statement
+                    except Exception as e:
+                        # For ALTERs, if it fails because it already exists (redundant with IF NOT EXISTS but safe to catch)
+                        if "already exists" in str(e).lower():
+                            continue
+                        logger.error(f"  ❌ Error executing statement {i+1}: {e}")
+                        # Keep going if it's just a migration that failed
+                        if i < 7: # Core tables must succeed
+                            raise
+            logger.info("✅ Database schema initialization complete.")
             return
-        except asyncio.TimeoutError:
-            logger.error(f"❌ Timeout initializing database on attempt {attempt}")
-            if attempt == max_retries:
-                raise
-            await asyncio.sleep(5)
         except Exception as e:
-            logger.error(f"❌ Error initializing database on attempt {attempt}: {e}")
+            logger.error(f"❌ Initialization failed on attempt {attempt}: {e}")
             if attempt == max_retries:
                 raise
             await asyncio.sleep(5)
