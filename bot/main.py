@@ -156,12 +156,12 @@ async def main():
 
     pool = await asyncpg.create_pool(
         config.DATABASE_URL,
-        min_size=5, # Baseline connections
-        max_size=25, # Max connections
-        command_timeout=60, # 60s per query
+        min_size=5,
+        max_size=40, # Increased to 40 to handle more concurrent requests
+        command_timeout=60,
         statement_cache_size=0,
         max_inactive_connection_lifetime=300.0,
-        max_queries=750 
+        max_queries=1000 
     )
     logger.info("Database pool created.")
 

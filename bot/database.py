@@ -123,7 +123,8 @@ SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions);
 
 
 async def init_db(pool: asyncpg.Pool):
-    """Initializes the database schema by checking existence first to avoid slow CREATE TABLE calls."""
+    """Initializes the database schema by checking existence first to avoid slow CREATE TABLE calls.
+    Uses longer timeouts to survive slow database responses."""
     
     table_checks = [
         ('users', """CREATE TABLE IF NOT EXISTS users (
@@ -209,11 +210,12 @@ async def init_db(pool: asyncpg.Pool):
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"Database initialization attempt {attempt}/{max_retries}...")
+            # Use a separate connection with a very long timeout for init
             async with pool.acquire() as conn:
                 # 1. Check and Create Tables
                 for table_name, create_stmt in table_checks:
                     try:
-                        async with asyncio.timeout(10):
+                        async with asyncio.timeout(60): # 60s per table check
                             exists = await conn.fetchval(
                                 "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)",
                                 table_name
@@ -227,7 +229,7 @@ async def init_db(pool: asyncpg.Pool):
                 # 2. Run Migrations
                 for stmt, label in migrations:
                     try:
-                        async with asyncio.timeout(15):
+                        async with asyncio.timeout(180): # 180s per migration (crucial for ALTERs/INDEXes)
                             await conn.execute(stmt)
                     except Exception as e:
                         if "already exists" not in str(e).lower():
@@ -235,7 +237,7 @@ async def init_db(pool: asyncpg.Pool):
 
                 # 3. Seed Default Data
                 try:
-                    async with asyncio.timeout(10):
+                    async with asyncio.timeout(30):
                         await conn.execute("""
                             INSERT INTO admin_config (key, value) VALUES
                                 ('broadcast_delay_seconds', '30'),
