@@ -21,8 +21,8 @@ def is_admin(user_id: int) -> bool:
 _pause_cooldowns: dict[int, float] = {}
 _upload_cooldowns: dict[int, list[float]] = {} # user_id -> [timestamps]
 COOLDOWN_TTL = 600
-# Increased for premium experience: 100 uploads per 60 seconds
-MAX_UPLOADS_PER_WINDOW = 100 
+# Effectively unlimited for premium experience: 100,000 uploads per 60 seconds
+MAX_UPLOADS_PER_WINDOW = 100000 
 WINDOW_SECONDS = 60
 
 
