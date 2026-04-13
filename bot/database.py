@@ -214,8 +214,8 @@ async def init_db(pool: asyncpg.Pool):
         try:
             logger.info(f"Database initialization attempt {attempt}/{max_retries}...")
             async with pool.acquire() as conn:
-                # Use a long transaction-level timeout for the whole process
-                async with asyncio.timeout(300): # 5 minutes for the whole init
+                # Use a very long timeout for the whole initialization process
+                async with asyncio.timeout(600): # 10 minutes for the whole init
                     # 1. Check and Create Tables (Using regclass for speed)
                     for table_name, create_stmt in table_checks:
                         try:
@@ -226,19 +226,17 @@ async def init_db(pool: asyncpg.Pool):
                         except Exception as e:
                             logger.warning(f"  ⚠️ Table check/create failed for {table_name}: {repr(e)}")
 
-                # 2. Run Migrations (Patiently)
-                for stmt, label in migrations:
-                    try:
-                        # Long timeout for migrations on slow Nano instances
-                        async with asyncio.timeout(120): 
+                    # 2. Run Migrations (Patiently)
+                    for stmt, label in migrations:
+                        try:
+                            # Long timeout for individual migrations
                             await conn.execute(stmt)
-                    except Exception as e:
-                        if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower():
-                            logger.warning(f"  ⚠️ Migration failed ({label}): {repr(e)}")
+                        except Exception as e:
+                            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower():
+                                logger.warning(f"  ⚠️ Migration failed ({label}): {repr(e)}")
 
-                # 3. Seed Default Data
-                try:
-                    async with asyncio.timeout(10):
+                    # 3. Seed Default Data
+                    try:
                         await conn.execute("""
                             INSERT INTO admin_config (key, value) VALUES
                                 ('broadcast_delay_seconds', '30'),
@@ -253,8 +251,8 @@ async def init_db(pool: asyncpg.Pool):
                         await conn.execute(
                             "INSERT INTO sessions (session_number) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions)"
                         )
-                except Exception as e:
-                    logger.warning(f"  ⚠️ Seeding data failed: {repr(e)}")
+                    except Exception as e:
+                        logger.warning(f"  ⚠️ Seeding data failed: {repr(e)}")
 
             logger.info("✅ Database schema initialization complete.")
             return
@@ -305,11 +303,9 @@ async def get_upload_context(pool: asyncpg.Pool, user_id: int) -> dict:
         try:
             async with asyncio.timeout(15):
                 async with pool.acquire() as conn:
-                    user_task = conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
-                    session_task = conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
-                    config_task = conn.fetch("SELECT key, value FROM admin_config")
-                    
-                    user, session, config_rows = await asyncio.gather(user_task, session_task, config_task)
+                    user = await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+                    session = await conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
+                    config_rows = await conn.fetch("SELECT key, value FROM admin_config")
                     
                     config = {row['key']: row['value'] for row in config_rows}
                     return {
@@ -334,12 +330,10 @@ async def get_start_context(pool: asyncpg.Pool, user_id: int) -> dict:
         try:
             async with asyncio.timeout(15):
                 async with pool.acquire() as conn:
-                    user_task = conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
-                    pending_task = conn.fetchrow("SELECT * FROM pending_verifications WHERE user_id = $1", user_id)
-                    session_task = conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
-                    config_task = conn.fetch("SELECT key, value FROM admin_config")
-                    
-                    user, pending, session, config_rows = await asyncio.gather(user_task, pending_task, session_task, config_task)
+                    user = await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+                    pending = await conn.fetchrow("SELECT * FROM pending_verifications WHERE user_id = $1", user_id)
+                    session = await conn.fetchrow("SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
+                    config_rows = await conn.fetch("SELECT key, value FROM admin_config")
                     
                     config = {row['key']: row['value'] for row in config_rows}
                     return {
@@ -365,10 +359,8 @@ async def get_verification_context(pool: asyncpg.Pool, user_id: int) -> dict:
         try:
             async with asyncio.timeout(15):
                 async with pool.acquire() as conn:
-                    pending_task = conn.fetchrow("SELECT * FROM pending_verifications WHERE user_id = $1", user_id)
-                    config_task = conn.fetch("SELECT key, value FROM admin_config")
-                    
-                    pending, config_rows = await asyncio.gather(pending_task, config_task)
+                    pending = await conn.fetchrow("SELECT * FROM pending_verifications WHERE user_id = $1", user_id)
+                    config_rows = await conn.fetch("SELECT key, value FROM admin_config")
                     
                     config = {row['key']: row['value'] for row in config_rows}
                     return {

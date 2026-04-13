@@ -188,10 +188,11 @@ async def main():
     # It will override the dummy one on the same port
     loop.create_task(run_health_server(pool, port))
 
-    # Run DB init in the background to not block bot startup
-    # This allows polling and broadcasting to start immediately
-    loop.create_task(init_db(pool))
-    logger.info("Database initialization started in background.")
+    # Run DB init BEFORE starting the bot tasks
+    # This ensures migrations are done before any queries run
+    logger.info("Starting database initialization...")
+    await init_db(pool)
+    logger.info("Database initialization complete.")
 
     bot = Bot(
         token=config.BOT_TOKEN,
