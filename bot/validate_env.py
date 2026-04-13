@@ -32,25 +32,23 @@ async def validate_database(url: str):
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
     
-    try:
-        conn = await asyncpg.connect(url, timeout=10, statement_cache_size=0)
-        logger.info("✅ Database connection successful.")
-        
-        # Check if tables exist
-        tables = ['users', 'sessions', 'media', 'sent_messages', 'admin_config']
-        for table in tables:
-            exists = await conn.fetchval(
-                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)",
-                table
-            )
-            if not exists:
-                logger.warning(f"⚠️ Table '{table}' does not exist yet. It will be created on first run.")
-        
-        await conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"❌ Database connection failed: {e}")
-        return False
+    # Try multiple times to handle transient Supabase network issues
+    for attempt in range(1, 4):
+        try:
+            # Just check connectivity with a simple SELECT 1
+            # No need to check tables here as init_db handles that
+            conn = await asyncpg.connect(url, timeout=15, statement_cache_size=0)
+            await conn.execute("SELECT 1")
+            await conn.close()
+            logger.info(f"✅ Database connection successful on attempt {attempt}.")
+            return True
+        except Exception as e:
+            if attempt < 3:
+                logger.warning(f"⚠️ Database connection attempt {attempt} failed: {e}. Retrying in 5s...")
+                await asyncio.sleep(5)
+            else:
+                logger.error(f"❌ Database connection failed after {attempt} attempts: {e}")
+                return False
 
 def validate_admin_id(admin_id_str: str):
     logger.info("Validating Admin ID...")

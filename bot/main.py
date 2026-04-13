@@ -156,12 +156,12 @@ async def main():
 
     pool = await asyncpg.create_pool(
         config.DATABASE_URL,
-        min_size=5,
-        max_size=50,
-        command_timeout=60,
+        min_size=2, # Minimum 2 connections
+        max_size=20, # Maximum 20 to stay safe on Supabase free tier
+        command_timeout=30, # Shorter timeout to fail fast
         statement_cache_size=0,
         max_inactive_connection_lifetime=300.0, # 5 minutes
-        max_queries=1000 # Periodically recycle connections
+        max_queries=500 # Recycle more often to handle "too many users" memory issues
     )
     logger.info("Database pool created.")
 
