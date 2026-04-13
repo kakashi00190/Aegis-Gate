@@ -15,9 +15,9 @@ from utils.health import health_monitor
 
 logger = logging.getLogger(__name__)
 
-CLEANUP_CONCURRENCY = 8
-CLEANUP_BATCH_SIZE = 200
-DELETE_DELAY = 0.035
+CLEANUP_CONCURRENCY = 4
+CLEANUP_BATCH_SIZE = 100
+DELETE_DELAY = 0.05
 
 
 from utils.limiter import global_rate_limiter

@@ -1130,9 +1130,9 @@ async def end_session(
         deleted_media = 0
         
         while True:
-            # Delete in batches of 500
+            # Delete in smaller batches of 200 to save CPU/IO on Nano instance
             res = await conn.execute(
-                "DELETE FROM media WHERE id IN (SELECT id FROM media WHERE session_id = $1 LIMIT 500)", 
+                "DELETE FROM media WHERE id IN (SELECT id FROM media WHERE session_id = $1 LIMIT 200)", 
                 session_id
             )
             count = int(res.split()[-1])
@@ -1142,15 +1142,16 @@ async def end_session(
             if progress_callback and total_media > 0:
                 pct = 40 + int((deleted_media / total_media) * 30)
                 await progress_callback(f"Cleaning up media ({deleted_media}/{total_media})...", pct)
-            await asyncio.sleep(0.1) # Small pause to let other queries in
+            await asyncio.sleep(0.5) # Increased pause to let Supabase Nano breathe
 
     # 4. Reset upload counts and update activity status in chunks
     async with pool.acquire() as conn:
         if progress_callback:
             await progress_callback("Resetting user stats...", 75)
 
-        # Only reset users who actually have uploads to minimize rows affected
+        # Reset in chunks if there are many users (though session_upload_count is usually few users)
         await conn.execute("UPDATE users SET session_upload_count = 0 WHERE session_upload_count > 0")
+        await asyncio.sleep(0.5)
         
         # Identify top 10% of active users
         total_active = await conn.fetchval("SELECT COUNT(*) FROM users WHERE status = 'active'") or 0
@@ -1161,14 +1162,15 @@ async def end_session(
 
         # Reset status for all active users EXCEPT the top 10%
         if top_10_percent_limit > 0:
+            # Using a more efficient way to exclude top users without heavy subqueries
             await conn.execute(
-                """WITH top_ids AS (
+                """UPDATE users SET status = 'inactive', uploads_since_inactive = 0 
+                   WHERE status = 'active' AND id NOT IN (
                        SELECT id FROM users 
+                       WHERE status = 'active'
                        ORDER BY total_media_lifetime DESC 
                        LIMIT $1
-                   )
-                   UPDATE users SET status = 'inactive', uploads_since_inactive = 0 
-                   WHERE status = 'active' AND id NOT IN (SELECT id FROM top_ids)""",
+                   )""",
                 top_10_percent_limit
             )
         else:
