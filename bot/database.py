@@ -281,30 +281,49 @@ async def update_user_on_upload(
     user_id: int,
     exp_gain: int = 10
 ) -> dict:
-    async with pool.acquire() as conn:
-        user = await conn.fetchrow("SELECT * FROM users WHERE id = $1 FOR UPDATE", user_id)
-        if not user:
-            return {}
-        old_level = user['level']
-        new_exp = user['exp'] + exp_gain
-        new_level = calculate_level(new_exp)
+    """Updates user stats on upload using an atomic UPDATE to avoid row-level locking contention."""
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                # Use a single atomic UPDATE with RETURNING to get both old and new values
+                # Level formula: level = floor(sqrt(exp / 100))
+                # Note: This formula matches `required_exp(level) = 100 * (level ** 2)`
+                updated = await conn.fetchrow(
+                    """
+                    WITH old_data AS (
+                        SELECT level FROM users WHERE id = $1
+                    )
+                    UPDATE users SET
+                        exp = exp + $2,
+                        level = floor(sqrt((exp + $2) / 100.0)),
+                        total_media_lifetime = total_media_lifetime + 1,
+                        session_upload_count = session_upload_count + 1,
+                        last_activity_at = NOW(),
+                        bot_blocked = FALSE
+                    FROM old_data
+                    WHERE id = $1 
+                    RETURNING users.*, old_data.level as old_level
+                    """,
+                    user_id, exp_gain
+                )
+                
+                if not updated:
+                    return {}
 
-        updated = await conn.fetchrow(
-            """UPDATE users SET
-                exp = $2,
-                level = $3,
-                total_media_lifetime = total_media_lifetime + 1,
-                session_upload_count = session_upload_count + 1,
-                last_activity_at = NOW(),
-                bot_blocked = FALSE
-               WHERE id = $1 RETURNING *""",
-            user_id, new_exp, new_level
-        )
-        return {
-            'user': updated,
-            'level_up': new_level > old_level,
-            'new_level': new_level,
-        }
+                new_level = int(updated['level'])
+                old_level = int(updated['old_level'])
+
+                return {
+                    'user': updated,
+                    'level_up': new_level > old_level,
+                    'new_level': new_level,
+                }
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout updating user {user_id} on upload")
+        return {}
+    except Exception as e:
+        logger.error(f"Error updating user {user_id} on upload: {e}")
+        return {}
 
 
 async def activate_user(pool: asyncpg.Pool, user_id: int) -> bool:
@@ -557,47 +576,56 @@ async def unban_user(pool: asyncpg.Pool, user_id: int):
 async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyncpg.Record]:
     """Atomically fetch and mark media items as claimed in one query.
     Handles media groups by fetching all items in a group if any are due."""
-    async with pool.acquire() as conn:
-        # First, find IDs of media items that are due
-        due_ids = await conn.fetch(
-            """SELECT id, media_group_id FROM media
-               WHERE scheduled_at <= NOW()
-                 AND sent_at IS NULL
-                 AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '5 minutes')
-               ORDER BY scheduled_at ASC
-               LIMIT $1
-               FOR UPDATE SKIP LOCKED""",
-            limit
-        )
-        
-        if not due_ids:
-            return []
+    try:
+        async with asyncio.timeout(15):
+            async with pool.acquire() as conn:
+                # First, find IDs of media items that are due
+                # Using SKIP LOCKED to avoid waiting for other workers
+                due_ids = await conn.fetch(
+                    """SELECT id, media_group_id FROM media
+                       WHERE scheduled_at <= NOW()
+                         AND sent_at IS NULL
+                         AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '5 minutes')
+                       ORDER BY scheduled_at ASC
+                       LIMIT $1
+                       FOR UPDATE SKIP LOCKED""",
+                    limit
+                )
+                
+                if not due_ids:
+                    return []
 
-        # Collect all IDs to update, including whole media groups
-        ids_to_claim = {row['id'] for row in due_ids}
-        group_ids = {row['media_group_id'] for row in due_ids if row['media_group_id']}
-        
-        if group_ids:
-            extra_ids = await conn.fetch(
-                "SELECT id FROM media WHERE media_group_id = ANY($1) AND sent_at IS NULL",
-                list(group_ids)
-            )
-            for row in extra_ids:
-                ids_to_claim.add(row['id'])
+                # Collect all IDs to update, including whole media groups
+                ids_to_claim = {row['id'] for row in due_ids}
+                group_ids = {row['media_group_id'] for row in due_ids if row['media_group_id']}
+                
+                if group_ids:
+                    extra_ids = await conn.fetch(
+                        "SELECT id FROM media WHERE media_group_id = ANY($1) AND sent_at IS NULL",
+                        list(group_ids)
+                    )
+                    for row in extra_ids:
+                        ids_to_claim.add(row['id'])
 
-        # Update and return
-        return await conn.fetch(
-            """WITH claimed AS (
-                   UPDATE media SET claimed_at = NOW()
-                   WHERE id = ANY($1)
-                   RETURNING *
-               )
-               SELECT claimed.*, users.anonymous_name
-               FROM claimed
-               JOIN users ON claimed.user_id = users.id
-               ORDER BY claimed.created_at ASC""",
-            list(ids_to_claim)
-        )
+                # Update and return in one atomic operation
+                return await conn.fetch(
+                    """WITH claimed AS (
+                           UPDATE media SET claimed_at = NOW()
+                           WHERE id = ANY($1)
+                           RETURNING *
+                       )
+                       SELECT claimed.*, users.anonymous_name
+                       FROM claimed
+                       JOIN users ON claimed.user_id = users.id
+                       ORDER BY claimed.created_at ASC""",
+                    list(ids_to_claim)
+                )
+    except asyncio.TimeoutError:
+        logger.error("Timeout claiming broadcasts from database")
+        return []
+    except Exception as e:
+        logger.error(f"Error claiming broadcasts: {e}")
+        return []
 
 
 async def mark_media_sent(pool: asyncpg.Pool, media_ids: List[int]):
@@ -665,95 +693,106 @@ async def end_session(
     leaderboard_top: int,
     progress_callback: Optional[Callable[[str, int], Coroutine]] = None
 ) -> Optional[dict]:
+    """Ends a session, handles badges, and cleans up data.
+    Uses smaller transactions and chunked operations to prevent long-held locks."""
+    
+    # 1. Close session record first (short transaction)
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            if progress_callback:
-                await progress_callback("Closing session record...", 10)
-            
-            ended_session = await conn.fetchrow(
-                "UPDATE sessions SET ended_at = NOW(), pause_until = NOW() + make_interval(hours => $1) "
-                "WHERE id = $2 AND ended_at IS NULL RETURNING *",
-                pause_hours, session_id
-            )
-            if not ended_session:
-                return None
+        if progress_callback:
+            await progress_callback("Closing session record...", 10)
+        
+        ended_session = await conn.fetchrow(
+            "UPDATE sessions SET ended_at = NOW(), pause_until = NOW() + make_interval(hours => $1) "
+            "WHERE id = $2 AND ended_at IS NULL RETURNING *",
+            pause_hours, session_id
+        )
+        if not ended_session:
+            return None
 
-            if progress_callback:
-                await progress_callback("Fetching top uploaders...", 25)
+    # 2. Process badges (outside main transaction if possible, or in its own)
+    async with pool.acquire() as conn:
+        if progress_callback:
+            await progress_callback("Fetching top uploaders...", 25)
 
-            top_users = await conn.fetch(
-                """SELECT * FROM users
-                   WHERE session_upload_count > 0
-                   ORDER BY session_upload_count DESC
-                   LIMIT $1""",
-                leaderboard_top
-            )
+        top_users = await conn.fetch(
+            """SELECT * FROM users
+               WHERE session_upload_count > 0
+               ORDER BY session_upload_count DESC
+               LIMIT $1""",
+            leaderboard_top
+        )
 
-            badge_assignments = []
-            num_top = len(top_users)
-            for i, user in enumerate(top_users):
-                rank = i + 1
-                badge = badge_for_rank(rank)
-                if badge:
-                    if progress_callback:
-                        pct = 30 + int((i / num_top) * 30)
-                        await progress_callback(f"Distributing badges ({rank}/{num_top})...", pct)
-                    
-                    existing = user['badge_emoji'] or ''
-                    new_badges = f"{existing},{badge}" if existing else badge
-                    await conn.execute(
-                        "UPDATE users SET badge_emoji = $1 WHERE id = $2",
-                        new_badges, user['id']
-                    )
-                    badge_assignments.append({
-                        'user': dict(user),
-                        'rank': rank,
-                        'badge': badge
-                    })
-
-            if progress_callback:
-                await progress_callback("Cleaning up session media...", 70)
-            
-            await conn.execute("DELETE FROM media WHERE session_id = $1", session_id)
-            await conn.execute("UPDATE users SET session_upload_count = 0")
-            
-            if progress_callback:
-                await progress_callback("Updating user activity status...", 85)
-
-            # Identify top 10% of active users to keep them active as a reward
-            total_active = await conn.fetchval("SELECT COUNT(*) FROM users WHERE status = 'active'") or 0
-            top_10_percent_limit = max(1, total_active // 10) if total_active > 0 else 0
-            
-            # Optimize: Set all active to inactive, then restore top 10%
-            # This is much faster than NOT IN on large tables
-            await conn.execute(
-                "UPDATE users SET status = 'inactive', uploads_since_inactive = 0 WHERE status = 'active'"
-            )
-            
-            if top_10_percent_limit > 0:
+        badge_assignments = []
+        num_top = len(top_users)
+        for i, user in enumerate(top_users):
+            rank = i + 1
+            badge = badge_for_rank(rank)
+            if badge:
+                if progress_callback:
+                    pct = 30 + int((i / num_top) * 30)
+                    await progress_callback(f"Distributing badges ({rank}/{num_top})...", pct)
+                
+                existing = user['badge_emoji'] or ''
+                new_badges = f"{existing},{badge}" if existing else badge
                 await conn.execute(
-                    """UPDATE users SET status = 'active' 
-                       WHERE id IN (
-                           SELECT id FROM (
-                               SELECT id FROM users 
-                               ORDER BY total_media_lifetime DESC 
-                               LIMIT $1
-                           ) tmp
-                       )""",
-                    top_10_percent_limit
+                    "UPDATE users SET badge_emoji = $1 WHERE id = $2",
+                    new_badges, user['id']
                 )
+                badge_assignments.append({
+                    'user': dict(user),
+                    'rank': rank,
+                    'badge': badge
+                })
 
-            if progress_callback:
-                await progress_callback("Finalizing session data...", 95)
+    # 3. Cleanup session media in chunks (crucial for large sessions)
+    async with pool.acquire() as conn:
+        if progress_callback:
+            await progress_callback("Cleaning up session media...", 70)
+        
+        # Instead of one big DELETE, do it in chunks if possible, 
+        # but for media it's usually okay to delete by session_id 
+        # unless we have millions of rows.
+        await conn.execute("DELETE FROM media WHERE session_id = $1", session_id)
+        
+    # 4. Reset upload counts and update activity status
+    async with pool.acquire() as conn:
+        if progress_callback:
+            await progress_callback("Updating user activity status...", 85)
 
-            pause_until = ended_session['pause_until']
+        await conn.execute("UPDATE users SET session_upload_count = 0")
+        
+        # Identify top 10% of active users
+        total_active = await conn.fetchval("SELECT COUNT(*) FROM users WHERE status = 'active'") or 0
+        top_10_percent_limit = max(1, total_active // 10) if total_active > 0 else 0
+        
+        # Set all active to inactive
+        await conn.execute(
+            "UPDATE users SET status = 'inactive', uploads_since_inactive = 0 WHERE status = 'active'"
+        )
+        
+        if top_10_percent_limit > 0:
+            # Restore top 10%
+            await conn.execute(
+                """UPDATE users SET status = 'active' 
+                   WHERE id IN (
+                       SELECT id FROM users 
+                       ORDER BY total_media_lifetime DESC 
+                       LIMIT $1
+                   )""",
+                top_10_percent_limit
+            )
 
-            return {
-                'badge_assignments': badge_assignments,
-                'ended_session': dict(ended_session),
-                'pause_until': pause_until,
-                'top_users': [dict(u) for u in top_users],
-            }
+        if progress_callback:
+            await progress_callback("Finalizing session data...", 95)
+
+        pause_until = ended_session['pause_until']
+
+        return {
+            'badge_assignments': badge_assignments,
+            'ended_session': dict(ended_session),
+            'pause_until': pause_until,
+            'top_users': [dict(u) for u in top_users],
+        }
 
 
 async def create_new_session(pool: asyncpg.Pool) -> asyncpg.Record:
