@@ -110,7 +110,6 @@ async def run_health_server(pool, port=None):
         
         # Background task to broadcast stats updates
         async def broadcast_stats():
-            return # TEMPORARILY DISABLED TO RECOVER SUPABASE
             if not pool:
                 return # Skip if no pool provided
             from database import get_advanced_stats

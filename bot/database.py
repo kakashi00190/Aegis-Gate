@@ -276,20 +276,6 @@ async def init_db(pool: asyncpg.Pool):
                         except Exception as e:
                             logger.warning(f"  ⚠️ Table check/create failed for {table_name}: {repr(e)}")
 
-                    # EMERGENCY WIPE: Clean up heavy tables to recover Supabase Nano
-                    # This runs once on every startup while the DB is unhealthy.
-                    try:
-                        logger.info("🚨 Performing Emergency Wipe to recover database resources...")
-                        # TRUNCATE is near-instant and recovers disk space/buffers
-                        await conn.execute("TRUNCATE TABLE sent_messages CASCADE")
-                        await conn.execute("TRUNCATE TABLE media CASCADE")
-                        # Reset session sequence to start fresh
-                        await conn.execute("DELETE FROM sessions")
-                        await conn.execute("INSERT INTO sessions (session_number) VALUES (1)")
-                        logger.info("✅ Emergency Wipe complete. Database should be responsive now.")
-                    except Exception as e:
-                        logger.warning(f"  ⚠️ Emergency Wipe failed (may already be clean): {repr(e)}")
-
                     # 2. Run Migrations (Patiently)
                     # We check if the column/index exists FIRST to avoid long locks or timeouts
                     # even if it's already there.
