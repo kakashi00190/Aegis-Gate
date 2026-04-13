@@ -195,18 +195,67 @@ async def init_db(pool: asyncpg.Pool):
     ]
 
     migrations = [
-        ("ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_blocked BOOLEAN DEFAULT FALSE", "users_bot_blocked"),
-        ("ALTER TABLE media ADD COLUMN IF NOT EXISTS media_group_id TEXT", "media_group_id"),
-        ("ALTER TABLE media ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE", "media_claimed_at"),
-        ("ALTER TABLE sent_messages ADD COLUMN IF NOT EXISTS media_id INTEGER REFERENCES media(id) ON DELETE SET NULL", "sent_messages_media_id"),
-        ("CREATE INDEX IF NOT EXISTS idx_media_queue ON media(scheduled_at) WHERE sent_at IS NULL AND scheduled_at IS NOT NULL", "idx_media_queue"),
-        ("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)", "idx_users_status"),
-        ("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_activity_at) WHERE status = 'active'", "idx_users_activity"),
-        ("CREATE INDEX IF NOT EXISTS idx_users_lower_name ON users(LOWER(anonymous_name))", "idx_users_lower_name"),
-        ("CREATE INDEX IF NOT EXISTS idx_sent_messages_session ON sent_messages(session_id)", "idx_sent_messages_session"),
-        ("CREATE INDEX IF NOT EXISTS idx_sent_messages_recipient ON sent_messages(recipient_id)", "idx_sent_messages_recipient"),
-        ("CREATE INDEX IF NOT EXISTS idx_users_session_uploads ON users(session_upload_count DESC)", "idx_users_session_uploads"),
-        ("CREATE INDEX IF NOT EXISTS idx_users_lifetime_media ON users(total_media_lifetime DESC)", "idx_users_lifetime_media")
+        # (check_sql, migration_sql, label)
+        (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='bot_blocked'",
+            "ALTER TABLE users ADD COLUMN bot_blocked BOOLEAN DEFAULT FALSE",
+            "users_bot_blocked"
+        ),
+        (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='media' AND column_name='media_group_id'",
+            "ALTER TABLE media ADD COLUMN media_group_id TEXT",
+            "media_group_id"
+        ),
+        (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='media' AND column_name='claimed_at'",
+            "ALTER TABLE media ADD COLUMN claimed_at TIMESTAMP WITH TIME ZONE",
+            "media_claimed_at"
+        ),
+        (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='sent_messages' AND column_name='media_id'",
+            "ALTER TABLE sent_messages ADD COLUMN media_id INTEGER REFERENCES media(id) ON DELETE SET NULL",
+            "sent_messages_media_id"
+        ),
+        (
+            "SELECT 1 FROM pg_indexes WHERE indexname='idx_media_queue'",
+            "CREATE INDEX idx_media_queue ON media(scheduled_at) WHERE sent_at IS NULL AND scheduled_at IS NOT NULL",
+            "idx_media_queue"
+        ),
+        (
+            "SELECT 1 FROM pg_indexes WHERE indexname='idx_users_status'",
+            "CREATE INDEX idx_users_status ON users(status)",
+            "idx_users_status"
+        ),
+        (
+            "SELECT 1 FROM pg_indexes WHERE indexname='idx_users_activity'",
+            "CREATE INDEX idx_users_activity ON users(last_activity_at) WHERE status = 'active'",
+            "idx_users_activity"
+        ),
+        (
+            "SELECT 1 FROM pg_indexes WHERE indexname='idx_users_lower_name'",
+            "CREATE INDEX idx_users_lower_name ON users(LOWER(anonymous_name))",
+            "idx_users_lower_name"
+        ),
+        (
+            "SELECT 1 FROM pg_indexes WHERE indexname='idx_sent_messages_session'",
+            "CREATE INDEX idx_sent_messages_session ON sent_messages(session_id)",
+            "idx_sent_messages_session"
+        ),
+        (
+            "SELECT 1 FROM pg_indexes WHERE indexname='idx_sent_messages_recipient'",
+            "CREATE INDEX idx_sent_messages_recipient ON sent_messages(recipient_id)",
+            "idx_sent_messages_recipient"
+        ),
+        (
+            "SELECT 1 FROM pg_indexes WHERE indexname='idx_users_session_uploads'",
+            "CREATE INDEX idx_users_session_uploads ON users(session_upload_count DESC)",
+            "idx_users_session_uploads"
+        ),
+        (
+            "SELECT 1 FROM pg_indexes WHERE indexname='idx_users_lifetime_media'",
+            "CREATE INDEX idx_users_lifetime_media ON users(total_media_lifetime DESC)",
+            "idx_users_lifetime_media"
+        )
     ]
 
     max_retries = 3
@@ -215,7 +264,8 @@ async def init_db(pool: asyncpg.Pool):
             logger.info(f"Database initialization attempt {attempt}/{max_retries}...")
             async with pool.acquire() as conn:
                 # Use a very long timeout for the whole initialization process
-                async with asyncio.timeout(600): # 10 minutes for the whole init
+                # Supabase Nano can be extremely slow under load (Unhealthy state)
+                async with asyncio.timeout(900): # 15 minutes for the whole init
                     # 1. Check and Create Tables (Using regclass for speed)
                     for table_name, create_stmt in table_checks:
                         try:
@@ -227,11 +277,18 @@ async def init_db(pool: asyncpg.Pool):
                             logger.warning(f"  ⚠️ Table check/create failed for {table_name}: {repr(e)}")
 
                     # 2. Run Migrations (Patiently)
-                    for stmt, label in migrations:
+                    # We check if the column/index exists FIRST to avoid long locks or timeouts
+                    # even if it's already there.
+                    for check_sql, stmt, label in migrations:
                         try:
-                            # Long timeout for individual migrations
-                            await conn.execute(stmt)
+                            exists = await conn.fetchval(check_sql)
+                            if not exists:
+                                logger.info(f"  Running migration: {label}")
+                                # Use separate timeout for each migration statement
+                                async with asyncio.timeout(300):
+                                    await conn.execute(stmt)
                         except Exception as e:
+                            # Still handle "already exists" just in case of race conditions
                             if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower():
                                 logger.warning(f"  ⚠️ Migration failed ({label}): {repr(e)}")
 

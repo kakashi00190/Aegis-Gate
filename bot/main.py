@@ -116,7 +116,7 @@ async def run_health_server(pool, port=None):
             last_stats = None
             while True:
                 TaskHealth.update("stats_broadcast")
-                await asyncio.sleep(60) # Increased from 15s to 60s to save Disk IO
+                await asyncio.sleep(120) # Increased from 60s to 120s to save Disk IO on unhealthy DB
                 if not ws_clients:
                     continue
                 
@@ -176,11 +176,11 @@ async def main():
     pool = await asyncpg.create_pool(
         config.DATABASE_URL,
         min_size=1, # Minimum connections for Supabase Nano
-        max_size=15, # Further reduced to 15 for stability
-        command_timeout=60,
+        max_size=10, # Further reduced for stability on resource-constrained Nano
+        command_timeout=300, # Increased to 5 mins to handle slow migrations/queries
         statement_cache_size=0,
         max_inactive_connection_lifetime=300.0,
-        max_queries=1000 
+        max_queries=500 # Reduced to prevent memory issues on small instances
     )
     logger.info("Database pool created.")
 
