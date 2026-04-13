@@ -90,8 +90,9 @@ async def stats_ws_handler(request):
     
     return ws
 
-async def run_health_server(pool):
-    port = int(os.environ.get("PORT", 8080))
+async def run_health_server(pool, port=None):
+    if port is None:
+        port = int(os.environ.get("PORT", 8080))
     app = web.Application()
     app['pool'] = pool
     app.router.add_get("/", health_handler) # Handle root for Render's default health check
@@ -109,6 +110,8 @@ async def run_health_server(pool):
         
         # Background task to broadcast stats updates
         async def broadcast_stats():
+            if not pool:
+                return # Skip if no pool provided
             from database import get_advanced_stats
             last_stats = None
             while True:
@@ -147,7 +150,13 @@ async def run_health_server(pool):
 
 
 async def main():
-    # Wait for potential old instances to shut down on Render
+    # 1. Start Health Server IMMEDIATELY (Render requires this)
+    port = int(os.environ.get("PORT", 8080))
+    # We need a dummy pool for health server before real pool is ready
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_health_server(None, port))
+    
+    # 2. Wait for potential old instances to shut down on Render
     await asyncio.sleep(5)
     
     logger.info("Starting Telegram Media Sharing Bot...")
@@ -157,6 +166,13 @@ async def main():
         logger.error("🛑 Startup aborted due to validation failure.")
         return
 
+    # Start health server early
+    # (Actually we already started a dummy one, so we just let it be or restart it)
+    # The dummy server doesn't have the real pool, so detailed stats won't work yet
+    # but the health check will pass. We'll replace it once we have the pool.
+    # For now, just continue.
+    
+    # 5. Initialize Database Pool
     pool = await asyncpg.create_pool(
         config.DATABASE_URL,
         min_size=1, # Minimum connections for Supabase Nano
@@ -168,9 +184,9 @@ async def main():
     )
     logger.info("Database pool created.")
 
-    # Start health server early
-    loop = asyncio.get_running_loop()
-    loop.create_task(run_health_server(pool))
+    # Now that we have the pool, let's start a real health server
+    # It will override the dummy one on the same port
+    loop.create_task(run_health_server(pool, port))
 
     # Run DB init in the background to not block bot startup
     # This allows polling and broadcasting to start immediately
