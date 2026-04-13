@@ -78,8 +78,8 @@ async def broadcast_new_session_started(bot: Bot, pool: asyncpg.Pool, new_sessio
         if status == 'active':
             text = (
                 f"🚀 <b>Session #{session_num} Has Started!</b>\n\n"
-                f"💤 You are currently <b>inactive</b>.\n"
-                f"Upload <b>{reactivation_threshold} media file(s)</b> to reactivate and start receiving content again!\n\n"
+                f"🌟 <b>You are currently active!</b>\n"
+                f"Upload more media to maintain your status and earn more badges!\n\n"
                 f"🏆 Top uploaders earn: 👑 🥈 🥉 🎖️ ⭐"
             )
         elif status == 'inactive':
