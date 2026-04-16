@@ -78,20 +78,25 @@ async def _send_fresh(source, text: str, reply_markup=None, parse_mode="HTML", l
             pass
     if isinstance(source, CallbackQuery):
         try:
-            await source.message.delete()
+            if source.message and hasattr(source.message, 'delete'):
+                await source.message.delete()
         except Exception:
             pass
-        return await source.message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return await source.bot.send_message(
+            source.from_user.id, text, parse_mode=parse_mode, reply_markup=reply_markup
+        )
     else:
         return await source.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
 
 async def _show_loading(callback: CallbackQuery, label: str = "Loading") -> Message:
     try:
-        await callback.message.delete()
+        if callback.message and hasattr(callback.message, 'delete'):
+            await callback.message.delete()
     except Exception:
         pass
-    return await callback.message.answer(
+    return await callback.bot.send_message(
+        callback.from_user.id,
         f"⏳ <b>{label}...</b>",
         parse_mode="HTML"
     )

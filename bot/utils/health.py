@@ -15,9 +15,9 @@ class TaskHealth:
         now = time.time()
         status = {}
         for name, last_seen in cls._tasks.items():
-            # If a task hasn't reported in for 5 minutes, mark it as stalled
-            # (Note: Some tasks might have longer sleep intervals, adjust accordingly)
-            is_healthy = (now - last_seen) < 300
+            # Increase threshold to 1 hour to accommodate long-running tasks and sleep intervals
+            # (e.g. check_session_end sleeps for 30 mins)
+            is_healthy = (now - last_seen) < 3600
             status[name] = {
                 "healthy": is_healthy,
                 "last_seen": last_seen,

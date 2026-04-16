@@ -81,12 +81,9 @@ async def get_cached_active_users(pool: asyncpg.Pool):
     if now - _active_users_cache['timestamp'] > CACHE_TTL:
         try:
             users = await get_all_active_users(pool)
-            if users: # Only update if we actually got users
-                _active_users_cache['users'] = users
-                _active_users_cache['timestamp'] = now
-            elif not _active_users_cache['users']:
-                # If cache is empty and DB returns empty, update timestamp to avoid hammering
-                _active_users_cache['timestamp'] = now
+            # Update cache always if we got a successful query
+            _active_users_cache['users'] = users
+            _active_users_cache['timestamp'] = now
         except Exception as e:
             logger.error(f"Error updating active users cache: {repr(e)}")
             # Keep using old cache even if it's expired
@@ -215,6 +212,7 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
     fail_count = 0
 
     for i in range(0, total_targets, CHUNK_SIZE):
+        health_monitor.update("broadcast_queue") # Update health during long broadcasts
         chunk = target_users[i:i + CHUNK_SIZE]
         tasks = [
             _send_with_semaphore(
@@ -260,12 +258,14 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             # CRITICAL FIX: Check recipients BEFORE claiming broadcasts
             # This prevents marking media as 'sent' when there's no one to receive it.
             recipients = await get_cached_active_users(pool)
+            
+            # Diagnostic log
+            now = time.monotonic()
+            if now - last_status_log > 60: # More frequent logs for debugging
+                logger.info(f"Broadcast loop heart-beat: {len(recipients)} active recipients.")
+                last_status_log = now
+
             if not recipients:
-                now = time.monotonic()
-                if now - last_status_log > 300: # Log every 5 mins
-                    logger.info("Broadcast queue: No active recipients. Waiting...")
-                    last_status_log = now
-                # If no active users, wait longer for someone to become active
                 await asyncio.sleep(10)
                 continue
 
