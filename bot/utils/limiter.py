@@ -28,5 +28,5 @@ class TokenBucketLimiter:
             self.tokens -= 1
 
 # Telegram allows ~30 messages per second to different users
-# We use 25 for safety
-global_rate_limiter = TokenBucketLimiter(rate=25, capacity=30)
+# We use 18 for higher safety on Render/Supabase Nano (avoiding massive connection spikes)
+global_rate_limiter = TokenBucketLimiter(rate=18, capacity=20)

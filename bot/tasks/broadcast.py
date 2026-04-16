@@ -33,11 +33,11 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
     except Exception as e:
         logger.error(f"Error in _local_store_sent_messages_batch: {repr(e)}")
 
-SEND_CONCURRENCY = 15
-SEND_DELAY_BASE = 0.05
+SEND_CONCURRENCY = 10
+SEND_DELAY_BASE = 0.08
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 20
+CHUNK_SIZE = 10
 
 _active_users_cache = {
     'users': [],
@@ -146,9 +146,12 @@ async def send_media_to_user(
             return True
 
         except TelegramRetryAfter as e:
-            wait_time = min(e.retry_after + 1, 10)
-            logger.warning(f"Rate limited (user {user_id}), waiting {wait_time}s")
+            # Automatic exponential backoff for flood control
+            wait_time = e.retry_after + 1
+            logger.warning(f"Flood control: User {user_id} or Global limit hit. Waiting {wait_time}s before retry.")
             await asyncio.sleep(wait_time)
+            # After a global flood, add extra jitter to prevent synchronized spikes
+            await asyncio.sleep(random.uniform(0.5, 2.0))
             continue
 
         except TelegramForbiddenError as e:
