@@ -1319,7 +1319,7 @@ async def clear_sent_messages(pool: asyncpg.Pool, session_id: int):
 
 async def get_wipe_stats(pool: asyncpg.Pool) -> dict:
     try:
-        async with asyncio.timeout(10): # 10 second timeout
+        async with asyncio.timeout(30):
             async with pool.acquire() as conn:
                 total_messages = await conn.fetchval(
                     "SELECT COUNT(*) FROM sent_messages"

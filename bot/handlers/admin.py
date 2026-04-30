@@ -18,7 +18,7 @@ from database import (
     create_report, set_report_admin_message, mark_user_blocked,
     get_wipe_stats, reset_all_blocked_status, DatabaseError
 )
-from utils.helpers import format_datetime, format_timedelta_until, get_all_badges
+from utils.helpers import format_datetime, format_timedelta_until, get_all_badges, safe_error
 from utils.session_announce import broadcast_session_results
 from tasks.cleanup import delete_session_messages, emergency_wipe_all
 from config import ADMIN_IDS, is_admin
@@ -1285,31 +1285,53 @@ async def admin_full_reset_confirm(callback: CallbackQuery, pool: asyncpg.Pool, 
 
     progress_msg = await callback.message.answer(
         "🔄 <b>Full Reset in Progress...</b>\n\n"
-        "⏳ Step 1/2: Deleting recent messages from chats (≤48h)...\n\n"
+        "⏳ Step 1/2: Quick scan for recent messages (≤48h)...\n\n"
         "ℹ️ Telegram doesn't allow bots to delete messages older than 48h.\n"
-        "Old messages will remain in chats but all DB data will be wiped.",
+        "DB tables will be TRUNCATED (instant) to free storage.",
         parse_mode="HTML"
     )
 
-    # Step 1: Try to delete recent (<48h) messages from chats
-    # This is best-effort — old messages can't be deleted by bots per Telegram API
-    wipe_result = await emergency_wipe_all(bot, pool, admin_msg=progress_msg)
-    deleted_msgs = wipe_result.get('deleted', 0)
-    db_cleaned = wipe_result.get('total', 0)
+    # Step 1: Try to delete only RECENT (<48h) messages from chats
+    # This is a quick operation — only recent messages, not 1.9M old ones
+    chat_deleted = 0
+    try:
+        async with asyncio.timeout(120):
+            async with pool.acquire() as conn:
+                # Only fetch messages sent within last 48h
+                recent = await conn.fetch(
+                    "SELECT recipient_id, message_id FROM sent_messages "
+                    "WHERE sent_at >= NOW() - INTERVAL '48 hours' LIMIT 5000"
+                )
+            if recent:
+                semaphore = asyncio.Semaphore(10)
+                from utils.limiter import global_rate_limiter
+
+                async def _quick_delete(row):
+                    await global_rate_limiter.consume()
+                    try:
+                        await bot.delete_message(row['recipient_id'], row['message_id'])
+                        return True
+                    except Exception:
+                        return False
+
+                tasks = [_quick_delete(row) for row in recent]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                chat_deleted = sum(1 for r in results if r is True)
+    except Exception as e:
+        logger.warning(f"Quick chat cleanup skipped: {safe_error(e)}")
 
     try:
         await progress_msg.edit_text(
             "🔄 <b>Full Reset in Progress...</b>\n\n"
             f"✅ Step 1/2: Chat cleanup done.\n"
-            f"🗑 Deleted from chats: {deleted_msgs:,} (recent only)\n"
-            f"💾 DB rows cleaned: {db_cleaned:,}\n\n"
-            "⏳ Step 2/2: Wiping all remaining database tables...",
+            f"🗑 Recent messages deleted from chats: <b>{chat_deleted:,}</b>\n\n"
+            "⏳ Step 2/2: TRUNCATING all database tables (instant)...",
             parse_mode="HTML"
         )
     except Exception:
         pass
 
-    # Step 2: TRUNCATE all remaining DB tables (instant — frees storage)
+    # Step 2: TRUNCATE all DB tables — instant, frees all storage
     from database import full_reset
     result = await full_reset(pool)
 
@@ -1317,19 +1339,19 @@ async def admin_full_reset_confirm(callback: CallbackQuery, pool: asyncpg.Pool, 
         done_text = (
             "✅ <b>Full Reset Complete</b>\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
-            f"🗑 Chat messages deleted: <b>{deleted_msgs:,}</b> (recent ≤48h)\n"
-            f"💾 All DB tables wiped: <b>{db_cleaned:,}</b> rows\n\n"
-            "Media, users, sessions, reports — all gone.\n"
+            f"🗑 Recent chat messages deleted: <b>{chat_deleted:,}</b>\n"
+            "💾 All DB tables TRUNCATED — storage freed!\n\n"
+            "Users, media, sessions, reports, sent_messages — all gone.\n"
             "Fresh session #1 created.\n\n"
             "⚠️ Messages older than 48h remain in user chats\n"
-            "(Telegram API limitation — bots can't delete them).\n\n"
+            "(Telegram API limitation — can't be deleted by bots).\n\n"
             "New users can now /start from scratch."
         )
     else:
         done_text = (
             f"⚠️ <b>Partial Reset</b>\n\n"
-            f"Chat deleted: {deleted_msgs:,} | DB cleaned: {db_cleaned:,}\n"
-            f"Table wipe error: {result.get('error', 'Unknown')}\n\n"
+            f"Chat deleted: {chat_deleted:,}\n"
+            f"DB wipe error: {result.get('error', 'Unknown')}\n\n"
             "Try again or check logs."
         )
 
