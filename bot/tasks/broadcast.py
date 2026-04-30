@@ -17,6 +17,7 @@ from database import (
 logger = logging.getLogger(__name__)
 
 from utils.limiter import global_rate_limiter
+from utils.helpers import safe_error
 
 # Define local batch storer to break circular dependency
 async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple]):
@@ -31,7 +32,7 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
                     batch
                 )
     except Exception as e:
-        logger.error(f"Error in _local_store_sent_messages_batch: {repr(e)}")
+        logger.error(f"Error in _local_store_sent_messages_batch: {safe_error(e)}")
 
 SEND_CONCURRENCY = 10
 SEND_DELAY_BASE = 0.08
@@ -73,7 +74,7 @@ async def sent_messages_logger_task(pool: asyncpg.Pool):
                 last_flush = now
                 
         except Exception as e:
-            logger.error(f"Error in sent_messages_logger_task: {repr(e)}")
+            logger.error(f"Error in sent_messages_logger_task: {safe_error(e)}")
             await asyncio.sleep(1)
 
 async def get_cached_active_users(pool: asyncpg.Pool):
@@ -85,7 +86,7 @@ async def get_cached_active_users(pool: asyncpg.Pool):
             _active_users_cache['users'] = users
             _active_users_cache['timestamp'] = now
         except Exception as e:
-            logger.error(f"Error updating active users cache: {repr(e)}")
+            logger.error(f"Error updating active users cache: {safe_error(e)}")
             # Keep using old cache even if it's expired
             _active_users_cache['timestamp'] = now - (CACHE_TTL / 2) # Retry sooner
             
@@ -121,7 +122,11 @@ async def send_media_to_user(
                 if messages and session_id:
                     for i, msg in enumerate(messages):
                         # Link each message to its specific media_id
-                        m_id = media_items[i]['id']
+                        # Guard against Telegram returning fewer messages than items
+                        if i < len(media_items):
+                            m_id = media_items[i]['id']
+                        else:
+                            m_id = None
                         _sent_messages_queue.put_nowait((user_id, msg.message_id, session_id, m_id))
                 return True
 
@@ -167,7 +172,7 @@ async def send_media_to_user(
                 await mark_user_blocked(pool, user_id)
                 return False
             
-            logger.error(f"Error sending to {user_id}: {repr(e)}")
+            logger.error(f"Error sending to {user_id}: {safe_error(e)}")
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(1)
@@ -303,5 +308,5 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as e:
-            logger.error(f"Broadcast queue error: {repr(e)}")
+            logger.error(f"Broadcast queue error: {safe_error(e)}")
             await asyncio.sleep(5)

@@ -8,119 +8,7 @@ from typing import Optional, List, Dict, Callable, Coroutine
 logger = logging.getLogger(__name__)
 
 from utils.levels import calculate_level
-from utils.helpers import badge_for_rank
-
-INIT_SQL = """
-CREATE TABLE IF NOT EXISTS users (
-    id BIGINT PRIMARY KEY,
-    anonymous_name TEXT UNIQUE NOT NULL,
-    status TEXT DEFAULT 'pending',
-    exp INTEGER DEFAULT 0,
-    level INTEGER DEFAULT 1,
-    total_media_lifetime INTEGER DEFAULT 0,
-    session_upload_count INTEGER DEFAULT 0,
-    uploads_since_inactive INTEGER DEFAULT 0,
-    badge_emoji TEXT DEFAULT '',
-    bot_blocked BOOLEAN DEFAULT FALSE,
-    last_activity_at TIMESTAMP WITH TIME ZONE,
-    joined_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_blocked BOOLEAN DEFAULT FALSE;
-
-CREATE TABLE IF NOT EXISTS sessions (
-    id SERIAL PRIMARY KEY,
-    session_number INTEGER UNIQUE NOT NULL,
-    started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    ended_at TIMESTAMP WITH TIME ZONE,
-    pause_until TIMESTAMP WITH TIME ZONE
-);
-
-CREATE TABLE IF NOT EXISTS media (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT REFERENCES users(id),
-    session_id INTEGER REFERENCES sessions(id),
-    file_id TEXT NOT NULL,
-    file_unique_id TEXT,
-    media_type TEXT NOT NULL,
-    media_group_id TEXT,
-    scheduled_at TIMESTAMP WITH TIME ZONE,
-    sent_at TIMESTAMP WITH TIME ZONE,
-    claimed_at TIMESTAMP WITH TIME ZONE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-ALTER TABLE media ADD COLUMN IF NOT EXISTS media_group_id TEXT;
-ALTER TABLE media ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP WITH TIME ZONE;
-
-DROP INDEX IF EXISTS idx_media_queue;
-CREATE INDEX IF NOT EXISTS idx_media_queue ON media(scheduled_at)
-    WHERE sent_at IS NULL AND scheduled_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
-CREATE INDEX IF NOT EXISTS idx_users_activity ON users(last_activity_at)
-    WHERE status = 'active';
-
-CREATE TABLE IF NOT EXISTS reports (
-    id SERIAL PRIMARY KEY,
-    reporter_id BIGINT REFERENCES users(id),
-    media_id INTEGER,
-    uploader_id BIGINT,
-    uploader_name TEXT,
-    media_file_id TEXT,
-    media_type TEXT,
-    reported_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    solved BOOLEAN DEFAULT FALSE,
-    solved_at TIMESTAMP WITH TIME ZONE,
-    admin_message_id INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS sent_messages (
-    id SERIAL PRIMARY KEY,
-    recipient_id BIGINT NOT NULL,
-    message_id BIGINT NOT NULL,
-    session_id INTEGER NOT NULL,
-    media_id INTEGER REFERENCES media(id) ON DELETE SET NULL,
-    sent_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-ALTER TABLE sent_messages DROP CONSTRAINT IF EXISTS sent_messages_media_id_fkey;
-DO $$ 
-BEGIN 
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sent_messages_media_id_fkey') THEN
-        ALTER TABLE sent_messages ADD CONSTRAINT sent_messages_media_id_fkey FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE SET NULL;
-    END IF;
-END $$;
-
-ALTER TABLE sent_messages ADD COLUMN IF NOT EXISTS media_id INTEGER REFERENCES media(id) ON DELETE SET NULL;
-
-CREATE INDEX IF NOT EXISTS idx_sent_messages_session ON sent_messages(session_id);
-CREATE INDEX IF NOT EXISTS idx_sent_messages_recipient ON sent_messages(recipient_id);
-
-CREATE TABLE IF NOT EXISTS pending_verifications (
-    user_id BIGINT PRIMARY KEY,
-    answer INTEGER NOT NULL,
-    reserved_name TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS admin_config (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-
-INSERT INTO admin_config (key, value) VALUES
-    ('broadcast_delay_seconds', '30'),
-    ('inactivity_minutes', '160'),
-    ('session_duration_days', '7'),
-    ('leaderboard_top', '10'),
-    ('session_pause_hours', '3'),
-    ('activation_threshold', '10'),
-    ('reactivation_threshold', '3')
-ON CONFLICT (key) DO NOTHING;
-
-INSERT INTO sessions (session_number)
-SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions);
-"""
+from utils.helpers import badge_for_rank, safe_error
 
 
 async def init_db(pool: asyncpg.Pool):
@@ -275,7 +163,7 @@ async def init_db(pool: asyncpg.Pool):
                                 logger.info(f"  Creating table: {table_name}")
                                 await conn.execute(create_stmt)
                         except Exception as e:
-                            logger.warning(f"  ⚠️ Table check/create failed for {table_name}: {repr(e)}")
+                            logger.warning(f"  ⚠️ Table check/create failed for {table_name}: {safe_error(e)}")
 
                     # 2. Run Migrations (Patiently)
                     # We check if the column/index exists FIRST to avoid long locks or timeouts
@@ -291,7 +179,7 @@ async def init_db(pool: asyncpg.Pool):
                         except Exception as e:
                             # Still handle "already exists" just in case of race conditions
                             if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower():
-                                logger.warning(f"  ⚠️ Migration failed ({label}): {repr(e)}")
+                                logger.warning(f"  ⚠️ Migration failed ({label}): {safe_error(e)}")
 
                     # 3. Seed Default Data
                     try:
@@ -310,12 +198,12 @@ async def init_db(pool: asyncpg.Pool):
                             "INSERT INTO sessions (session_number) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM sessions)"
                         )
                     except Exception as e:
-                        logger.warning(f"  ⚠️ Seeding data failed: {repr(e)}")
+                        logger.warning(f"  ⚠️ Seeding data failed: {safe_error(e)}")
 
             logger.info("✅ Database schema initialization complete.")
             return
         except Exception as e:
-            logger.error(f"❌ Initialization failed on attempt {attempt}: {repr(e)}")
+            logger.error(f"❌ Initialization failed on attempt {attempt}: {safe_error(e)}")
             if attempt == max_retries:
                 raise
             await asyncio.sleep(5)
@@ -328,7 +216,7 @@ async def get_config(pool: asyncpg.Pool) -> Dict[str, str]:
                 rows = await conn.fetch("SELECT key, value FROM admin_config")
                 return {row['key']: row['value'] for row in rows}
     except Exception as e:
-        logger.error(f"Error fetching config: {repr(e)}")
+        logger.error(f"Error fetching config: {safe_error(e)}")
         return {}
 
 
@@ -342,7 +230,14 @@ async def set_config(pool: asyncpg.Pool, key: str, value: str):
                     key, value
                 )
     except Exception as e:
-        logger.error(f"Error setting config {key}: {repr(e)}")
+        logger.error(f"Error setting config {key}: {safe_error(e)}")
+    else:
+        invalidate_stats_cache()
+
+
+class DatabaseError(Exception):
+    """Raised when a database operation fails (distinct from 'not found')."""
+    pass
 
 
 async def get_user(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]:
@@ -350,9 +245,12 @@ async def get_user(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 return await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout fetching user {user_id}")
+        raise DatabaseError(f"Timeout fetching user {user_id}")
     except Exception as e:
-        logger.error(f"Error fetching user {user_id}: {repr(e)}")
-        return None
+        logger.error(f"Error fetching user {user_id}: {safe_error(e)}")
+        raise DatabaseError(f"Error fetching user {user_id}")
 
 
 async def get_upload_context(pool: asyncpg.Pool, user_id: int) -> dict:
@@ -374,10 +272,10 @@ async def get_upload_context(pool: asyncpg.Pool, user_id: int) -> dict:
                     }
         except Exception as e:
             if attempt < 3:
-                logger.warning(f"Retry {attempt} for upload context {user_id}: {repr(e)}")
+                logger.warning(f"Retry {attempt} for upload context {user_id}: {safe_error(e)}")
                 await asyncio.sleep(1)
                 continue
-            logger.error(f"Final error fetching upload context for {user_id}: {repr(e)}")
+            logger.error(f"Final error fetching upload context for {user_id}: {safe_error(e)}")
             return {'success': False, 'error': str(e)}
     return {'success': False, 'error': 'Max retries reached'}
 
@@ -403,10 +301,10 @@ async def get_start_context(pool: asyncpg.Pool, user_id: int) -> dict:
                     }
         except Exception as e:
             if attempt < 3:
-                logger.warning(f"Retry {attempt} for start context {user_id}: {repr(e)}")
+                logger.warning(f"Retry {attempt} for start context {user_id}: {safe_error(e)}")
                 await asyncio.sleep(1)
                 continue
-            logger.error(f"Final error fetching start context for {user_id}: {repr(e)}")
+            logger.error(f"Final error fetching start context for {user_id}: {safe_error(e)}")
             return {'success': False, 'error': str(e)}
     return {'success': False, 'error': 'Max retries reached'}
 
@@ -428,10 +326,10 @@ async def get_verification_context(pool: asyncpg.Pool, user_id: int) -> dict:
                     }
         except Exception as e:
             if attempt < 3:
-                logger.warning(f"Retry {attempt} for verification context {user_id}: {repr(e)}")
+                logger.warning(f"Retry {attempt} for verification context {user_id}: {safe_error(e)}")
                 await asyncio.sleep(1)
                 continue
-            logger.error(f"Final error fetching verification context for {user_id}: {repr(e)}")
+            logger.error(f"Final error fetching verification context for {user_id}: {safe_error(e)}")
             return {'success': False, 'error': str(e)}
     return {'success': False, 'error': 'Max retries reached'}
 
@@ -444,7 +342,7 @@ async def get_user_by_name(pool: asyncpg.Pool, name: str) -> Optional[asyncpg.Re
                     "SELECT * FROM users WHERE LOWER(anonymous_name) = LOWER($1)", name
                 )
     except Exception as e:
-        logger.error(f"Error fetching user by name {name}: {repr(e)}")
+        logger.error(f"Error fetching user by name {name}: {safe_error(e)}")
         return None
 
 
@@ -463,7 +361,7 @@ async def get_user_by_id_or_name(pool: asyncpg.Pool, query: str) -> Optional[asy
                     "SELECT * FROM users WHERE LOWER(anonymous_name) = LOWER($1)", query
                 )
     except Exception as e:
-        logger.error(f"Error fetching user by id or name {query}: {repr(e)}")
+        logger.error(f"Error fetching user by id or name {query}: {safe_error(e)}")
         return None
 
 
@@ -475,8 +373,8 @@ async def name_exists(pool: asyncpg.Pool, name: str) -> bool:
                     "SELECT 1 FROM users WHERE LOWER(anonymous_name) = LOWER($1)", name
                 ))
     except Exception as e:
-        logger.error(f"Error checking name existence {name}: {repr(e)}")
-        return False
+        logger.error(f"Error checking name existence {name}: {safe_error(e)}")
+        return True  # Fail-safe: assume name exists to prevent duplicate constraint violation
 
 
 async def save_pending_verification(pool: asyncpg.Pool, user_id: int, answer: int, reserved_name: str):
@@ -489,7 +387,7 @@ async def save_pending_verification(pool: asyncpg.Pool, user_id: int, answer: in
                     user_id, answer, reserved_name
                 )
     except Exception as e:
-        logger.error(f"Error saving verification for {user_id}: {repr(e)}")
+        logger.error(f"Error saving verification for {user_id}: {safe_error(e)}")
 
 
 async def get_pending_verification(pool: asyncpg.Pool, user_id: int) -> Optional[asyncpg.Record]:
@@ -500,7 +398,7 @@ async def get_pending_verification(pool: asyncpg.Pool, user_id: int) -> Optional
                     "SELECT * FROM pending_verifications WHERE user_id = $1", user_id
                 )
     except Exception as e:
-        logger.error(f"Error fetching verification for {user_id}: {repr(e)}")
+        logger.error(f"Error fetching verification for {user_id}: {safe_error(e)}")
         return None
 
 
@@ -512,7 +410,7 @@ async def clear_pending_verification(pool: asyncpg.Pool, user_id: int):
                     "DELETE FROM pending_verifications WHERE user_id = $1", user_id
                 )
     except Exception as e:
-        logger.error(f"Error clearing verification for {user_id}: {repr(e)}")
+        logger.error(f"Error clearing verification for {user_id}: {safe_error(e)}")
 
 
 async def cleanup_stale_verifications(pool: asyncpg.Pool, max_age_hours: int = 24) -> int:
@@ -526,7 +424,7 @@ async def cleanup_stale_verifications(pool: asyncpg.Pool, max_age_hours: int = 2
                 count = int(result.split()[-1]) if result else 0
                 return count
     except Exception as e:
-        logger.error(f"Error cleaning up verifications: {repr(e)}")
+        logger.error(f"Error cleaning up verifications: {safe_error(e)}")
         return 0
 
 
@@ -536,11 +434,15 @@ async def create_user(pool: asyncpg.Pool, user_id: int, anonymous_name: str) -> 
         try:
             async with asyncio.timeout(15): # Increased timeout
                 async with pool.acquire() as conn:
-                    return await conn.fetchrow(
+                    row = await conn.fetchrow(
                         "INSERT INTO users (id, anonymous_name, status) VALUES ($1, $2, 'pending') "
-                        "ON CONFLICT (id) DO UPDATE SET anonymous_name = users.anonymous_name RETURNING *",
+                        "ON CONFLICT (id) DO NOTHING RETURNING *",
                         user_id, anonymous_name
                     )
+                    if row:
+                        return row
+                    # User already exists — fetch instead
+                    return await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
         except asyncio.TimeoutError:
             if attempt == max_retries:
                 logger.error(f"Final timeout error creating user {user_id}")
@@ -548,8 +450,10 @@ async def create_user(pool: asyncpg.Pool, user_id: int, anonymous_name: str) -> 
             logger.warning(f"Timeout creating user {user_id}, retrying ({attempt}/{max_retries})...")
             await asyncio.sleep(2)
         except Exception as e:
-            logger.error(f"Error creating user {user_id}: {repr(e)}")
+            logger.error(f"Error creating user {user_id}: {safe_error(e)}")
             raise
+    else:
+        invalidate_stats_cache()
 
 
 async def get_current_session(pool: asyncpg.Pool) -> Optional[asyncpg.Record]:
@@ -560,7 +464,7 @@ async def get_current_session(pool: asyncpg.Pool) -> Optional[asyncpg.Record]:
                     "SELECT * FROM sessions ORDER BY id DESC LIMIT 1"
                 )
     except Exception as e:
-        logger.error(f"Error fetching current session: {repr(e)}")
+        logger.error(f"Error fetching current session: {safe_error(e)}")
         return None
 
 
@@ -617,7 +521,7 @@ async def add_media(
                     user_id, session_id, file_id, file_unique_id, media_type, scheduled_at, media_group_id
                 )
     except Exception as e:
-        logger.error(f"Error adding media for {user_id}: {repr(e)}")
+        logger.error(f"Error adding media for {user_id}: {safe_error(e)}")
         return None
 
 
@@ -667,7 +571,7 @@ async def update_user_on_upload(
         logger.error(f"Timeout updating user {user_id} on upload")
         return {}
     except Exception as e:
-        logger.error(f"Error updating user {user_id} on upload: {repr(e)}")
+        logger.error(f"Error updating user {user_id} on upload: {safe_error(e)}")
         return {}
 
 
@@ -682,8 +586,10 @@ async def activate_user(pool: asyncpg.Pool, user_id: int) -> bool:
                 )
                 return bool(result)
     except Exception as e:
-        logger.error(f"Error activating user {user_id}: {repr(e)}")
+        logger.error(f"Error activating user {user_id}: {safe_error(e)}")
         return False
+    else:
+        invalidate_stats_cache()
 
 
 async def reactivate_user(pool: asyncpg.Pool, user_id: int) -> bool:
@@ -697,8 +603,10 @@ async def reactivate_user(pool: asyncpg.Pool, user_id: int) -> bool:
                 )
                 return bool(result)
     except Exception as e:
-        logger.error(f"Error reactivating user {user_id}: {repr(e)}")
+        logger.error(f"Error reactivating user {user_id}: {safe_error(e)}")
         return False
+    else:
+        invalidate_stats_cache()
 
 
 async def increment_inactive_uploads(pool: asyncpg.Pool, user_id: int) -> int:
@@ -711,7 +619,7 @@ async def increment_inactive_uploads(pool: asyncpg.Pool, user_id: int) -> int:
                     user_id
                 )
     except Exception as e:
-        logger.error(f"Error incrementing inactive uploads for {user_id}: {repr(e)}")
+        logger.error(f"Error incrementing inactive uploads for {user_id}: {safe_error(e)}")
         return 0
 
 
@@ -724,7 +632,9 @@ async def mark_user_blocked(pool: asyncpg.Pool, user_id: int):
                     user_id
                 )
     except Exception as e:
-        logger.error(f"Error marking user {user_id} as blocked: {repr(e)}")
+        logger.error(f"Error marking user {user_id} as blocked: {safe_error(e)}")
+    else:
+        invalidate_stats_cache()
 
 
 async def mark_user_unblocked(pool: asyncpg.Pool, user_id: int):
@@ -736,7 +646,7 @@ async def mark_user_unblocked(pool: asyncpg.Pool, user_id: int):
                     user_id
                 )
     except Exception as e:
-        logger.error(f"Error marking user {user_id} as unblocked: {repr(e)}")
+        logger.error(f"Error marking user {user_id} as unblocked: {safe_error(e)}")
 
 
 async def reset_all_blocked_status(pool: asyncpg.Pool) -> int:
@@ -746,7 +656,7 @@ async def reset_all_blocked_status(pool: asyncpg.Pool) -> int:
                 result = await conn.execute("UPDATE users SET bot_blocked = FALSE WHERE status != 'banned'")
                 return int(result.split()[-1]) if result else 0
     except Exception as e:
-        logger.error(f"Error resetting blocked status: {repr(e)}")
+        logger.error(f"Error resetting blocked status: {safe_error(e)}")
         return 0
 
 
@@ -767,7 +677,7 @@ async def get_user_rank(pool: asyncpg.Pool, user_id: int) -> int:
                 )
                 return rank or 1
     except Exception as e:
-        logger.debug(f"Error fetching rank for {user_id}: {repr(e)}")
+        logger.debug(f"Error fetching rank for {user_id}: {safe_error(e)}")
         return 1
 
 
@@ -782,7 +692,7 @@ async def get_leaderboard(pool: asyncpg.Pool, limit: int = 10) -> List[asyncpg.R
                     limit
                 )
     except Exception as e:
-        logger.error(f"Error fetching leaderboard: {repr(e)}")
+        logger.error(f"Error fetching leaderboard: {safe_error(e)}")
         return []
 
 
@@ -794,7 +704,7 @@ async def get_all_active_users(pool: asyncpg.Pool) -> List[asyncpg.Record]:
                     "SELECT id FROM users WHERE status = 'active' AND bot_blocked = FALSE"
                 )
     except Exception as e:
-        logger.error(f"Error fetching active users: {repr(e)}")
+        logger.error(f"Error fetching active users: {safe_error(e)}")
         return []
 
 
@@ -806,7 +716,7 @@ async def count_active_users(pool: asyncpg.Pool) -> int:
                     "SELECT COUNT(*) FROM users WHERE status = 'active' AND bot_blocked = FALSE"
                 )
     except Exception as e:
-        logger.error(f"Error counting active users: {repr(e)}")
+        logger.error(f"Error counting active users: {safe_error(e)}")
         return 0
 
 
@@ -818,7 +728,7 @@ async def get_all_notifiable_users(pool: asyncpg.Pool) -> List[asyncpg.Record]:
                     "SELECT id, status FROM users WHERE status NOT IN ('banned') AND bot_blocked = FALSE"
                 )
     except Exception as e:
-        logger.error(f"Error fetching notifiable users: {repr(e)}")
+        logger.error(f"Error fetching notifiable users: {safe_error(e)}")
         return []
 
 
@@ -828,6 +738,11 @@ _stats_cache = {
     'timestamp': 0
 }
 STATS_CACHE_TTL = 300 # 5 minutes cache
+
+
+def invalidate_stats_cache():
+    """Reset stats cache so next read fetches fresh data. Call after mutations."""
+    _stats_cache['timestamp'] = 0
 
 async def get_advanced_stats(pool: asyncpg.Pool) -> dict:
     now = time.time()
@@ -915,7 +830,7 @@ async def get_advanced_stats(pool: asyncpg.Pool) -> dict:
         logger.error("Timeout fetching advanced stats from database")
         return {'status': 'timeout', 'error': 'Database timeout'}
     except Exception as e:
-        logger.error(f"Error fetching advanced stats: {repr(e)}")
+        logger.error(f"Error fetching advanced stats: {safe_error(e)}")
         return {'status': 'error', 'error': str(e)}
 
 
@@ -937,7 +852,7 @@ async def get_unsolved_reports(
                     limit, offset
                 )
     except Exception as e:
-        logger.error(f"Error fetching unsolved reports: {repr(e)}")
+        logger.error(f"Error fetching unsolved reports: {safe_error(e)}")
         return []
 
 
@@ -947,7 +862,7 @@ async def count_unsolved_reports(pool: asyncpg.Pool) -> int:
             async with pool.acquire() as conn:
                 return await conn.fetchval("SELECT COUNT(*) FROM reports WHERE solved = FALSE") or 0
     except Exception as e:
-        logger.error(f"Error counting unsolved reports: {repr(e)}")
+        logger.error(f"Error counting unsolved reports: {safe_error(e)}")
         return 0
 
 
@@ -960,7 +875,7 @@ async def solve_report(pool: asyncpg.Pool, report_id: int):
                     report_id
                 )
     except Exception as e:
-        logger.error(f"Error solving report {report_id}: {repr(e)}")
+        logger.error(f"Error solving report {report_id}: {safe_error(e)}")
 
 
 async def ban_user(pool: asyncpg.Pool, user_id: int):
@@ -979,7 +894,9 @@ async def ban_user(pool: asyncpg.Pool, user_id: int):
                         user_id
                     )
     except Exception as e:
-        logger.error(f"Error banning user {user_id}: {repr(e)}")
+        logger.error(f"Error banning user {user_id}: {safe_error(e)}")
+    else:
+        invalidate_stats_cache()
 
 
 async def unban_user(pool: asyncpg.Pool, user_id: int):
@@ -991,7 +908,9 @@ async def unban_user(pool: asyncpg.Pool, user_id: int):
                     user_id
                 )
     except Exception as e:
-        logger.error(f"Error unbanning user {user_id}: {repr(e)}")
+        logger.error(f"Error unbanning user {user_id}: {safe_error(e)}")
+    else:
+        invalidate_stats_cache()
 
 
 async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyncpg.Record]:
@@ -1046,7 +965,7 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
         logger.error("Timeout claiming broadcasts from database (DB too busy - 60s exceeded)")
         return []
     except Exception as e:
-        logger.error(f"Error claiming broadcasts: {repr(e)}")
+        logger.error(f"Error claiming broadcasts: {safe_error(e)}")
         return []
 
 
@@ -1060,7 +979,7 @@ async def mark_media_sent(pool: asyncpg.Pool, media_ids: List[int]):
                     media_ids
                 )
     except Exception as e:
-        logger.error(f"Error marking media as sent {media_ids}: {repr(e)}")
+        logger.error(f"Error marking media as sent {media_ids}: {safe_error(e)}")
 
 
 async def unclaim_broadcast(pool: asyncpg.Pool, media_ids: List[int], delay_seconds: int = 30):
@@ -1076,7 +995,7 @@ async def unclaim_broadcast(pool: asyncpg.Pool, media_ids: List[int], delay_seco
                     delay_seconds, media_ids
                 )
     except Exception as e:
-        logger.error(f"Error unclaiming media {media_ids}: {repr(e)}")
+        logger.error(f"Error unclaiming media {media_ids}: {safe_error(e)}")
 
 
 async def get_inactive_users(pool: asyncpg.Pool, cutoff: datetime) -> List[asyncpg.Record]:
@@ -1091,7 +1010,7 @@ async def get_inactive_users(pool: asyncpg.Pool, cutoff: datetime) -> List[async
                     cutoff
                 )
     except Exception as e:
-        logger.error(f"Error fetching inactive users: {repr(e)}")
+        logger.error(f"Error fetching inactive users: {safe_error(e)}")
         return []
 
 
@@ -1114,7 +1033,7 @@ async def create_report(
                     reporter_id, media_id, uploader_id, uploader_name, media_file_id, media_type
                 )
     except Exception as e:
-        logger.error(f"Error creating report: {repr(e)}")
+        logger.error(f"Error creating report: {safe_error(e)}")
         raise
 
 
@@ -1127,7 +1046,7 @@ async def set_report_admin_message(pool: asyncpg.Pool, report_id: int, msg_id: i
                     report_id, msg_id
                 )
     except Exception as e:
-        logger.error(f"Error setting report admin message: {repr(e)}")
+        logger.error(f"Error setting report admin message: {safe_error(e)}")
 
 
 async def end_session(
@@ -1139,106 +1058,102 @@ async def end_session(
 ) -> Optional[dict]:
     """Ends a session, handles badges, and resets stats. Media cleanup should be handled separately."""
     
-    # 1. Close session record first (short transaction)
     async with pool.acquire() as conn:
-        if progress_callback:
-            await progress_callback("Closing session record...", 5)
-        
-        ended_session = await conn.fetchrow(
-            "UPDATE sessions SET ended_at = NOW(), pause_until = NOW() + make_interval(hours => $1) "
-            "WHERE id = $2 AND ended_at IS NULL RETURNING *",
-            pause_hours, session_id
-        )
-        if not ended_session:
-            return None
-
-    # 2. Process badges (MUST happen before resetting counts)
-    async with pool.acquire() as conn:
-        if progress_callback:
-            await progress_callback("Fetching top uploaders...", 15)
-
-        top_users = await conn.fetch(
-            """SELECT * FROM users
-               WHERE session_upload_count > 0
-               ORDER BY session_upload_count DESC
-               LIMIT $1""",
-            leaderboard_top
-        )
-
-        badge_assignments = []
-        num_top = len(top_users)
-        for i, user in enumerate(top_users):
-            rank = i + 1
-            badge = badge_for_rank(rank)
-            if badge:
-                if progress_callback and i % 5 == 0:
-                    pct = 15 + int((i / num_top) * 20)
-                    await progress_callback(f"Distributing badges ({rank}/{num_top})...", pct)
-                
-                existing = user['badge_emoji'] or ''
-                # Only add badge if not already present
-                if badge not in existing:
-                    new_badges = f"{existing},{badge}" if existing else badge
-                    await conn.execute(
-                        "UPDATE users SET badge_emoji = $1 WHERE id = $2",
-                        new_badges, user['id']
-                    )
-                
-                badge_assignments.append({
-                    'user': dict(user),
-                    'rank': rank,
-                    'badge': badge
-                })
-
-    # 3. Reset upload counts IMMEDIATELY after badge processing
-    async with pool.acquire() as conn:
-        if progress_callback:
-            await progress_callback("Resetting user stats...", 50)
-        
-        # Reset counts for everyone. This is critical for the leaderboard.
-        await conn.execute("UPDATE users SET session_upload_count = 0 WHERE session_upload_count > 0")
-        await asyncio.sleep(0.5)
-
-    # 4. Update activity status in chunks
-    async with pool.acquire() as conn:
-        if progress_callback:
-            await progress_callback("Updating activity status...", 70)
-
-        # Identify top 10% of active users
-        total_active = await conn.fetchval("SELECT COUNT(*) FROM users WHERE status = 'active'") or 0
-        top_10_percent_limit = max(1, total_active // 10) if total_active > 0 else 0
-        
-        if progress_callback:
-            await progress_callback("Updating activity status...", 85)
-
-        # Reset status for all active users EXCEPT the top 10%
-        if top_10_percent_limit > 0:
-            await conn.execute(
-                """UPDATE users SET status = 'inactive', uploads_since_inactive = 0 
-                   WHERE status = 'active' AND id NOT IN (
-                       SELECT id FROM users 
-                       WHERE status = 'active'
-                       ORDER BY total_media_lifetime DESC 
-                       LIMIT $1
-                   )""",
-                top_10_percent_limit
+        async with conn.transaction():
+            # 1. Close session record
+            if progress_callback:
+                await progress_callback("Closing session record...", 5)
+            
+            ended_session = await conn.fetchrow(
+                "UPDATE sessions SET ended_at = NOW(), pause_until = NOW() + make_interval(hours => $1) "
+                "WHERE id = $2 AND ended_at IS NULL RETURNING *",
+                pause_hours, session_id
             )
-        else:
-            await conn.execute(
-                "UPDATE users SET status = 'inactive', uploads_since_inactive = 0 WHERE status = 'active'"
+            if not ended_session:
+                return None
+
+            # 2. Process badges (MUST happen before resetting counts)
+            if progress_callback:
+                await progress_callback("Fetching top uploaders...", 15)
+
+            top_users = await conn.fetch(
+                """SELECT * FROM users
+                   WHERE session_upload_count > 0
+                   ORDER BY session_upload_count DESC
+                   LIMIT $1""",
+                leaderboard_top
             )
 
-        if progress_callback:
-            await progress_callback("Finalizing session data...", 95)
+            badge_assignments = []
+            num_top = len(top_users)
+            for i, user in enumerate(top_users):
+                rank = i + 1
+                badge = badge_for_rank(rank)
+                if badge:
+                    if progress_callback and i % 5 == 0:
+                        pct = 15 + int((i / num_top) * 20)
+                        await progress_callback(f"Distributing badges ({rank}/{num_top})...", pct)
+                    
+                    existing = user['badge_emoji'] or ''
+                    # Only add badge if not already present
+                    if badge not in existing:
+                        new_badges = f"{existing},{badge}" if existing else badge
+                        await conn.execute(
+                            "UPDATE users SET badge_emoji = $1 WHERE id = $2",
+                            new_badges, user['id']
+                        )
+                    
+                    badge_assignments.append({
+                        'user': dict(user),
+                        'rank': rank,
+                        'badge': badge
+                    })
 
-        pause_until = ended_session['pause_until']
+            # 3. Reset upload counts IMMEDIATELY after badge processing
+            if progress_callback:
+                await progress_callback("Resetting user stats...", 50)
+            
+            await conn.execute("UPDATE users SET session_upload_count = 0 WHERE session_upload_count > 0")
 
-        return {
-            'badge_assignments': badge_assignments,
-            'ended_session': dict(ended_session),
-            'pause_until': pause_until,
-            'top_users': [dict(u) for u in top_users],
-        }
+            # 4. Update activity status
+            if progress_callback:
+                await progress_callback("Updating activity status...", 70)
+
+            # Identify top 10% of active users
+            total_active = await conn.fetchval("SELECT COUNT(*) FROM users WHERE status = 'active'") or 0
+            top_10_percent_limit = max(1, total_active // 10) if total_active > 0 else 0
+            
+            if progress_callback:
+                await progress_callback("Updating activity status...", 85)
+
+            # Reset status for all active users EXCEPT the top 10%
+            if top_10_percent_limit > 0:
+                await conn.execute(
+                    """UPDATE users SET status = 'inactive', uploads_since_inactive = 0 
+                       WHERE status = 'active' AND id NOT IN (
+                           SELECT id FROM users 
+                           WHERE status = 'active'
+                           ORDER BY total_media_lifetime DESC 
+                           LIMIT $1
+                       )""",
+                    top_10_percent_limit
+                )
+            else:
+                await conn.execute(
+                    "UPDATE users SET status = 'inactive', uploads_since_inactive = 0 WHERE status = 'active'"
+                )
+
+            if progress_callback:
+                await progress_callback("Finalizing session data...", 95)
+
+            pause_until = ended_session['pause_until']
+
+            return {
+                'badge_assignments': badge_assignments,
+                'ended_session': dict(ended_session),
+                'pause_until': pause_until,
+                'top_users': [dict(u) for u in top_users],
+            }
 
 
 async def cleanup_session_media(pool: asyncpg.Pool, session_id: int):
@@ -1247,25 +1162,26 @@ async def cleanup_session_media(pool: asyncpg.Pool, session_id: int):
         logger.info(f"Starting media cleanup for session #{session_id}")
         async with pool.acquire() as conn:
             total_media = await conn.fetchval("SELECT COUNT(*) FROM media WHERE session_id = $1", session_id) or 0
-            deleted_media = 0
-            
-            while True:
-                # Delete in smaller batches of 200 to save CPU/IO on Nano instance
+        deleted_media = 0
+        
+        while True:
+            # Acquire/release connection per batch to avoid starving the pool
+            async with pool.acquire() as conn:
                 res = await conn.execute(
                     "DELETE FROM media WHERE id IN (SELECT id FROM media WHERE session_id = $1 LIMIT 200)", 
                     session_id
                 )
-                count = int(res.split()[-1])
-                if count == 0:
-                    break
-                deleted_media += count
-                if deleted_media % 1000 == 0:
-                    logger.info(f"Cleanup session #{session_id}: {deleted_media}/{total_media} media deleted")
-                await asyncio.sleep(1.0) # 1s pause between batches for Nano health
-            
-            logger.info(f"Completed media cleanup for session #{session_id}. Total: {deleted_media}")
+            count = int(res.split()[-1])
+            if count == 0:
+                break
+            deleted_media += count
+            if deleted_media % 1000 == 0:
+                logger.info(f"Cleanup session #{session_id}: {deleted_media}/{total_media} media deleted")
+            await asyncio.sleep(1.0) # 1s pause between batches for Nano health
+        
+        logger.info(f"Completed media cleanup for session #{session_id}. Total: {deleted_media}")
     except Exception as e:
-        logger.error(f"Error in cleanup_session_media for session #{session_id}: {repr(e)}")
+        logger.error(f"Error in cleanup_session_media for session #{session_id}: {safe_error(e)}")
 
 
 async def create_new_session(pool: asyncpg.Pool) -> asyncpg.Record:
@@ -1282,7 +1198,7 @@ async def create_new_session(pool: asyncpg.Pool) -> asyncpg.Record:
                         next_number
                     )
     except Exception as e:
-        logger.error(f"Error creating new session: {repr(e)}")
+        logger.error(f"Error creating new session: {safe_error(e)}")
         raise
 
 
@@ -1308,7 +1224,7 @@ async def get_session_stats(pool: asyncpg.Pool) -> dict:
                     'top_user': dict(top_user) if top_user else None,
                 }
     except Exception as e:
-        logger.error(f"Error fetching session stats: {repr(e)}")
+        logger.error(f"Error fetching session stats: {safe_error(e)}")
         return {}
 
 
@@ -1328,7 +1244,7 @@ async def store_sent_message(
                     recipient_id, message_id, session_id, media_id
                 )
     except Exception as e:
-        logger.error(f"Error storing sent message: {repr(e)}")
+        logger.error(f"Error storing sent message: {safe_error(e)}")
 
 
 async def store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple]):
@@ -1343,7 +1259,7 @@ async def store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple]):
                     batch
                 )
     except Exception as e:
-        logger.error(f"Error storing sent messages batch: {repr(e)}")
+        logger.error(f"Error storing sent messages batch: {safe_error(e)}")
 
 
 async def get_session_sent_messages(pool: asyncpg.Pool, session_id: int) -> List[asyncpg.Record]:
@@ -1355,7 +1271,7 @@ async def get_session_sent_messages(pool: asyncpg.Pool, session_id: int) -> List
                     session_id
                 )
     except Exception as e:
-        logger.error(f"Error fetching session messages: {repr(e)}")
+        logger.error(f"Error fetching session messages: {safe_error(e)}")
         return []
 
 
@@ -1371,7 +1287,7 @@ async def get_session_sent_messages_batch(
                     session_id, limit, offset
                 )
     except Exception as e:
-        logger.error(f"Error fetching session messages batch: {repr(e)}")
+        logger.error(f"Error fetching session messages batch: {safe_error(e)}")
         return []
 
 
@@ -1386,7 +1302,7 @@ async def delete_sent_messages_batch(pool: asyncpg.Pool, ids: List[int]):
                     ids
                 )
     except Exception as e:
-        logger.error(f"Error deleting messages batch: {repr(e)}")
+        logger.error(f"Error deleting messages batch: {safe_error(e)}")
 
 
 async def clear_sent_messages(pool: asyncpg.Pool, session_id: int):
@@ -1398,7 +1314,7 @@ async def clear_sent_messages(pool: asyncpg.Pool, session_id: int):
                     session_id
                 )
     except Exception as e:
-        logger.error(f"Error clearing session messages: {repr(e)}")
+        logger.error(f"Error clearing session messages: {safe_error(e)}")
 
 
 async def get_wipe_stats(pool: asyncpg.Pool) -> dict:
@@ -1442,7 +1358,7 @@ async def get_wipe_stats(pool: asyncpg.Pool) -> dict:
         logger.error("Timeout fetching wipe stats from database")
         return {'status': 'timeout', 'error': 'Database timeout'}
     except Exception as e:
-        logger.error(f"Error fetching wipe stats: {repr(e)}")
+        logger.error(f"Error fetching wipe stats: {safe_error(e)}")
         return {'status': 'error', 'error': str(e)}
 
 
@@ -1461,3 +1377,29 @@ async def get_all_sent_messages_batch(
             "ORDER BY id ASC LIMIT $1",
             limit
         )
+
+
+async def full_reset(pool: asyncpg.Pool) -> dict:
+    """Wipe ALL bot data for a fresh start. Keeps admin_config and table structure.
+    Use when switching to a new bot token to clear old bot's stats."""
+    try:
+        async with asyncio.timeout(60):
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    # Wipe data tables in dependency order
+                    await conn.execute("TRUNCATE TABLE sent_messages CASCADE")
+                    await conn.execute("TRUNCATE TABLE reports CASCADE")
+                    await conn.execute("TRUNCATE TABLE media CASCADE")
+                    await conn.execute("TRUNCATE TABLE pending_verifications CASCADE")
+                    await conn.execute("TRUNCATE TABLE users CASCADE")
+                    await conn.execute("TRUNCATE TABLE sessions CASCADE")
+                    # Re-seed a default session
+                    await conn.execute("INSERT INTO sessions (session_number) VALUES (1)")
+        invalidate_stats_cache()
+        return {'status': 'ok', 'message': 'Full reset complete. All data wiped.'}
+    except asyncio.TimeoutError:
+        logger.error("Timeout during full reset")
+        return {'status': 'timeout', 'error': 'Database timeout'}
+    except Exception as e:
+        logger.error(f"Error during full reset: {safe_error(e)}")
+        return {'status': 'error', 'error': str(e)}

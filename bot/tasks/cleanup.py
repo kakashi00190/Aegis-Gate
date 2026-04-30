@@ -12,6 +12,7 @@ from database import (
 )
 
 from utils.health import health_monitor
+from utils.helpers import format_timedelta_until, safe_error
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ async def _delete_one_message(
         except (TelegramBadRequest, TelegramForbiddenError):
             return False
         except Exception as e:
-            logger.error(f"Cleanup error for user {chat_id}: {repr(e)}")
+            logger.error(f"Cleanup error for user {chat_id}: {safe_error(e)}")
             return False
 
 
@@ -59,11 +60,13 @@ async def _count_total_messages(pool: asyncpg.Pool, session_id: int) -> int:
                     session_id
                 ) or 0
     except Exception as e:
-        logger.error(f"Error counting messages for cleanup: {repr(e)}")
+        logger.error(f"Error counting messages for cleanup: {safe_error(e)}")
         return 0
 
 
 def generate_progress_bar(pct: int, length: int = 15) -> str:
+    if pct <= 0:
+        return "░" * length
     filled = int((pct / 100) * length)
     chars = ["░", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"]
     
@@ -97,8 +100,8 @@ async def delete_session_messages(bot: Bot, pool: asyncpg.Pool, session_id: int)
     for user in users:
         try:
             # ONLY send real-time progress to the Admin to avoid rate limits
-            from config import ADMIN_ID
-            if user['id'] == ADMIN_ID:
+            from config import is_admin
+            if is_admin(user['id']):
                 msg = await bot.send_message(
                     user['id'],
                     f"🧹 <b>Wiping session media...</b>\n\n"
@@ -256,8 +259,8 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
     for user in users:
         try:
             # ONLY send real-time progress to the Admin to avoid rate limits
-            from config import ADMIN_ID
-            if user['id'] == ADMIN_ID:
+            from config import is_admin
+            if is_admin(user['id']):
                 msg = await bot.send_message(
                     user['id'],
                     f"🚨 <b>EMERGENCY MEDIA WIPE</b>\n\n"
@@ -395,7 +398,7 @@ async def cleanup_stale_verifications_task(pool: asyncpg.Pool):
                 if deleted != "DELETE 0":
                     logger.info(f"Cleaned up stale verifications: {deleted}")
         except Exception as e:
-            logger.error(f"Error in cleanup_stale_verifications_task: {repr(e)}")
+            logger.error(f"Error in cleanup_stale_verifications_task: {safe_error(e)}")
 
 
 async def _count_all_messages(pool: asyncpg.Pool) -> int:

@@ -3,6 +3,21 @@ from datetime import datetime, timezone
 
 LINK_PATTERN = re.compile(r'(https?://|t\.me/|@\w+)', re.IGNORECASE)
 
+_DSN_PATTERN = re.compile(
+    r'(?:postgresql?|postgres)://[^\s\'"<>]+', re.IGNORECASE
+)
+_URL_PATTERN = re.compile(
+    r'https?://[^\s\'"<>]+', re.IGNORECASE
+)
+
+
+def safe_error(exc: Exception) -> str:
+    """Return exception repr with any DSN/URL stripped to prevent credential leaks."""
+    msg = repr(exc)
+    msg = _DSN_PATTERN.sub('[DSN_REDACTED]', msg)
+    msg = _URL_PATTERN.sub('[URL_REDACTED]', msg)
+    return msg
+
 
 def contains_link(text: str) -> bool:
     if not text:

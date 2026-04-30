@@ -10,13 +10,10 @@ from database import (
     increment_inactive_uploads, get_upload_context
 )
 from utils.helpers import contains_link, format_timedelta_until
-from config import ADMIN_ID
+from config import is_admin
 
 logger = logging.getLogger(__name__)
 router = Router()
-
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
 
 _pause_cooldowns: dict[int, float] = {}
 _upload_cooldowns: dict[int, list[float]] = {} # user_id -> [timestamps]

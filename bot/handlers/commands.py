@@ -8,14 +8,14 @@ import asyncpg
 from database import (
     get_user, get_user_by_id_or_name, get_user_rank,
     get_leaderboard, get_config, get_current_session, is_session_paused,
-    create_report, set_report_admin_message
+    create_report, set_report_admin_message, DatabaseError
 )
 from utils.helpers import (
     get_badge_display, get_all_badges, format_datetime,
     format_timedelta_until, medal_for_rank
 )
 from utils.levels import format_level_bar
-from config import ADMIN_ID
+from config import ADMIN_IDS
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -54,7 +54,11 @@ def build_user_card(user: dict, rank: int, show_session_info: str = "") -> str:
 
 @router.message(Command("me"))
 async def cmd_me(message: Message, pool: asyncpg.Pool):
-    user = await get_user(pool, message.from_user.id)
+    try:
+        user = await get_user(pool, message.from_user.id)
+    except DatabaseError:
+        await message.answer("⚠️ Database is busy. Please try again in a moment.")
+        return
     if not user:
         await message.answer("⚠️ You are not registered. Use /start to begin.")
         return
@@ -113,7 +117,10 @@ async def cmd_leaderboard(message: Message, pool: asyncpg.Pool):
     session = await get_current_session(pool)
 
     leaders = await get_leaderboard(pool, limit=top_n)
-    user = await get_user(pool, message.from_user.id)
+    try:
+        user = await get_user(pool, message.from_user.id)
+    except DatabaseError:
+        user = None
 
     session_num = session['session_number'] if session else 1
 
@@ -143,7 +150,11 @@ async def cmd_leaderboard(message: Message, pool: asyncpg.Pool):
 
 @router.message(Command("report"))
 async def cmd_report(message: Message, pool: asyncpg.Pool, bot: Bot):
-    user = await get_user(pool, message.from_user.id)
+    try:
+        user = await get_user(pool, message.from_user.id)
+    except DatabaseError:
+        await message.answer("⚠️ Database is busy. Please try again in a moment.")
+        return
     if not user:
         await message.answer("⚠️ You are not registered. Use /start to begin.")
         return
@@ -229,16 +240,20 @@ async def cmd_report(message: Message, pool: asyncpg.Pool, bot: Bot):
     )
 
     try:
-        if media_type == 'photo':
-            msg = await bot.send_photo(ADMIN_ID, file_id, caption=caption,
-                                       parse_mode="HTML", reply_markup=kb)
-        elif media_type == 'video':
-            msg = await bot.send_video(ADMIN_ID, file_id, caption=caption,
-                                       parse_mode="HTML", reply_markup=kb)
-        else:
-            msg = await bot.send_document(ADMIN_ID, file_id, caption=caption,
+        # Send report to all admins
+        last_msg = None
+        for admin_id in ADMIN_IDS:
+            if media_type == 'photo':
+                last_msg = await bot.send_photo(admin_id, file_id, caption=caption,
+                                           parse_mode="HTML", reply_markup=kb)
+            elif media_type == 'video':
+                last_msg = await bot.send_video(admin_id, file_id, caption=caption,
+                                           parse_mode="HTML", reply_markup=kb)
+            else:
+                last_msg = await bot.send_document(admin_id, file_id, caption=caption,
                                           parse_mode="HTML", reply_markup=kb)
-        await set_report_admin_message(pool, report['id'], msg.message_id)
+        if last_msg:
+            await set_report_admin_message(pool, report['id'], last_msg.message_id)
     except Exception as e:
         logger.error(f"Failed to send report to admin: {e}")
 

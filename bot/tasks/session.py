@@ -12,7 +12,7 @@ from database import (
     cleanup_session_media
 )
 from utils.session_announce import broadcast_session_end, broadcast_new_session_started
-from utils.helpers import format_timedelta_until
+from utils.helpers import format_timedelta_until, safe_error
 from tasks.cleanup import delete_session_messages
 
 from utils.health import health_monitor
@@ -103,5 +103,5 @@ async def check_session_end(bot: Bot, pool: asyncpg.Pool):
             await asyncio.sleep(1800)
 
         except Exception as e:
-            logger.error(f"Session check error: {repr(e)}")
+            logger.error(f"Session check error: {safe_error(e)}")
             await asyncio.sleep(60) # Short wait on error

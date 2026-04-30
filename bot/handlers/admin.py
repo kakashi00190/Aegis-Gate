@@ -16,12 +16,12 @@ from database import (
     solve_report, get_user, get_user_by_id_or_name, ban_user, unban_user,
     get_current_session, end_session, get_session_stats, is_session_paused,
     create_report, set_report_admin_message, mark_user_blocked,
-    get_wipe_stats, reset_all_blocked_status
+    get_wipe_stats, reset_all_blocked_status, DatabaseError
 )
 from utils.helpers import format_datetime, format_timedelta_until, get_all_badges
 from utils.session_announce import broadcast_session_results
 from tasks.cleanup import delete_session_messages, emergency_wipe_all
-from config import ADMIN_ID
+from config import ADMIN_IDS, is_admin
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -40,10 +40,6 @@ class AdminAnnounceState(StatesGroup):
     confirming = State()
 
 
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
-
-
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -60,6 +56,9 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🚨 Emergency Wipe", callback_data="admin_emergency_wipe"),
+        ],
+        [
+            InlineKeyboardButton(text="🔄 Full Reset", callback_data="admin_full_reset"),
         ],
     ])
 
@@ -488,7 +487,7 @@ async def cb_solve_report(callback: CallbackQuery, pool: asyncpg.Pool):
 
 
 @router.callback_query(F.data == "admin_users")
-async def admin_users(callback: CallbackQuery, state: FSMContext, pool: asyncpg.Pool):
+async def admin_users(callback: CallbackQuery, state: FSMContext = None, pool: asyncpg.Pool = None):
     if not is_admin(callback.from_user.id):
         return
     loading = await _show_loading(callback, "Loading users")
@@ -1241,6 +1240,101 @@ async def admin_emergency_wipe_confirm(callback: CallbackQuery, pool: asyncpg.Po
         await callback.message.answer(admin_done, parse_mode="HTML", reply_markup=admin_main_keyboard())
 
 
+@router.callback_query(F.data == "admin_full_reset")
+async def admin_full_reset(callback: CallbackQuery, pool: asyncpg.Pool):
+    if not is_admin(callback.from_user.id):
+        return
+
+    stats = await get_wipe_stats(pool)
+    text = (
+        "🔄 <b>Full Reset — WARNING</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "This will <b>permanently delete ALL bot data</b>:\n\n"
+        f"👤 Users: <b>{stats.get('total_users', '?')}</b>\n"
+        f"📸 Media in queue: <b>{stats.get('media_in_queue', '?')}</b>\n"
+        f"💬 Tracked messages: <b>{stats.get('total_messages', '?')}</b>\n"
+        f"📋 Sessions: <b>{stats.get('unique_sessions', '?')}</b>\n\n"
+        "⚠️ <b>This cannot be undone.</b> Use this when switching\n"
+        "to a new bot token and old stats are showing.\n\n"
+        "Admin config (settings) will be preserved."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ YES — Full Reset", callback_data="admin_full_reset_confirm"),
+            InlineKeyboardButton(text="❌ NO — Cancel", callback_data="admin_main"),
+        ],
+        [InlineKeyboardButton(text="◀️ Back", callback_data="admin_main")],
+    ])
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "admin_full_reset_confirm")
+async def admin_full_reset_confirm(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
+    if not is_admin(callback.from_user.id):
+        return
+
+    await callback.answer("🔄 Starting full reset...")
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    progress_msg = await callback.message.answer(
+        "🔄 <b>Full Reset in Progress...</b>\n\n"
+        "⏳ Step 1/2: Deleting messages from all user chats...",
+        parse_mode="HTML"
+    )
+
+    # Step 1: Delete all tracked messages from user chats FIRST
+    # (before truncating sent_messages so we still know what to delete)
+    wipe_result = await emergency_wipe_all(bot, pool, admin_msg=progress_msg)
+    deleted_msgs = wipe_result.get('deleted', 0)
+
+    try:
+        await progress_msg.edit_text(
+            "🔄 <b>Full Reset in Progress...</b>\n\n"
+            f"✅ Step 1/2: Deleted {deleted_msgs:,} messages from user chats.\n"
+            "⏳ Step 2/2: Wiping all database tables...",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    # Step 2: Wipe all DB tables
+    from database import full_reset
+    result = await full_reset(pool)
+
+    if result.get('status') == 'ok':
+        done_text = (
+            "✅ <b>Full Reset Complete</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"🗑 Messages deleted from chats: <b>{deleted_msgs:,}</b>\n"
+            "All user data, media, sessions, reports wiped.\n\n"
+            "A fresh session #1 has been created.\n"
+            "New users can now /start from scratch."
+        )
+    else:
+        done_text = (
+            f"⚠️ <b>Partial Reset</b>\n\n"
+            f"Messages deleted: {deleted_msgs:,}\n"
+            f"DB wipe error: {result.get('error', 'Unknown')}\n\n"
+            "Try again or check logs."
+        )
+
+    try:
+        await progress_msg.edit_text(done_text, parse_mode="HTML", reply_markup=admin_main_keyboard())
+    except Exception:
+        try:
+            await progress_msg.delete()
+        except Exception:
+            pass
+        await callback.message.answer(done_text, parse_mode="HTML", reply_markup=admin_main_keyboard())
+
+
 @router.callback_query(F.data.startswith("report_"))
 async def cb_report_media(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
     parts = callback.data.split("_")
@@ -1255,7 +1349,11 @@ async def cb_report_media(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot)
         return
 
     reporter_id = callback.from_user.id
-    reporter = await get_user(pool, reporter_id)
+    try:
+        reporter = await get_user(pool, reporter_id)
+    except DatabaseError:
+        await callback.answer("⚠️ Database busy. Try again.")
+        return
     if not reporter:
         await callback.answer("You must be registered to report.")
         return
@@ -1279,7 +1377,10 @@ async def cb_report_media(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot)
         await callback.answer("⚠️ This media is no longer available.")
         return
 
-    uploader = await get_user(pool, media['user_id'])
+    try:
+        uploader = await get_user(pool, media['user_id'])
+    except DatabaseError:
+        uploader = None
     uploader_name = uploader['anonymous_name'] if uploader else "unknown"
 
     report = await create_report(
@@ -1306,16 +1407,20 @@ async def cb_report_media(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot)
     )
 
     try:
-        if media['media_type'] == 'photo':
-            msg = await bot.send_photo(ADMIN_ID, media['file_id'],
+        # Send report to all admins
+        last_msg = None
+        for admin_id in ADMIN_IDS:
+            if media['media_type'] == 'photo':
+                last_msg = await bot.send_photo(admin_id, media['file_id'],
                                        caption=caption, parse_mode="HTML", reply_markup=kb)
-        elif media['media_type'] == 'video':
-            msg = await bot.send_video(ADMIN_ID, media['file_id'],
+            elif media['media_type'] == 'video':
+                last_msg = await bot.send_video(admin_id, media['file_id'],
                                        caption=caption, parse_mode="HTML", reply_markup=kb)
-        else:
-            msg = await bot.send_document(ADMIN_ID, media['file_id'],
+            else:
+                last_msg = await bot.send_document(admin_id, media['file_id'],
                                           caption=caption, parse_mode="HTML", reply_markup=kb)
-        await set_report_admin_message(pool, report['id'], msg.message_id)
+        if last_msg:
+            await set_report_admin_message(pool, report['id'], last_msg.message_id)
     except Exception as e:
         logger.error(f"Failed to send report to admin: {e}")
 

@@ -18,6 +18,7 @@ from database import init_db
 from handlers import start, media, commands, admin
 from tasks.broadcast import process_broadcast_queue, sent_messages_logger_task
 from tasks.inactivity import check_inactivity
+from utils.helpers import safe_error
 from tasks.session import check_session_end
 from tasks.cleanup import cleanup_stale_verifications_task
 
@@ -67,16 +68,19 @@ async def stats_ws_handler(request):
     try:
         # Send initial stats
         pool = request.app['pool']
-        from database import get_advanced_stats
-        stats = await get_advanced_stats(pool)
-        
+
         # Convert datetime objects to string for JSON serialization
         def json_serial(obj):
             if isinstance(obj, (datetime, timedelta)):
                 return str(obj)
             return obj
 
-        await ws.send_str(json.dumps(stats, default=json_serial))
+        if pool is None:
+            await ws.send_str(json.dumps({"status": "initializing", "message": "Database not ready yet"}, default=json_serial))
+        else:
+            from database import get_advanced_stats
+            stats = await get_advanced_stats(pool)
+            await ws.send_str(json.dumps(stats, default=json_serial))
         
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
@@ -139,9 +143,9 @@ async def run_health_server(pool, port=None):
                             if not ws.closed:
                                 await ws.send_str(data)
                         except Exception as e:
-                            logger.debug(f"Error sending to WS client: {repr(e)}")
+                            logger.debug(f"Error sending to WS client: {safe_error(e)}")
                 except Exception as e:
-                    logger.error(f"Error in stats broadcast loop: {repr(e)}")
+                    logger.error(f"Error in stats broadcast loop: {safe_error(e)}")
 
         asyncio.create_task(broadcast_stats())
         
@@ -214,12 +218,12 @@ async def main():
     loop.create_task(check_session_end(bot, pool))
     loop.create_task(cleanup_stale_verifications_task(pool))
 
-    logger.info(f"Bot running. Admin ID: {config.ADMIN_ID}")
+    logger.info(f"Bot running. Admin IDs configured: {len(config.ADMIN_IDS)}")
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except Exception as e:
-        logger.error(f"Polling error: {repr(e)}")
+        logger.error(f"Polling error: {safe_error(e)}")
     finally:
         logger.info("Closing bot resources...")
         await bot.session.close()

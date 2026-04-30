@@ -159,15 +159,21 @@ async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
 
 @router.message(VerificationState.waiting_answer)
 async def process_verification(message: Message, state: FSMContext, pool: asyncpg.Pool):
-    data = await state.get_data()
-    correct = data.get('answer')
+    # Read answer from DB (not FSM) so verification survives bot restarts
+    pending = await get_pending_verification(pool, message.from_user.id)
+    if not pending:
+        # Verification expired or bot restarted — restart the flow
+        await state.clear()
+        await message.answer("⚠️ Verification expired. Please /start again.")
+        return
+
+    correct = pending['answer']
 
     try:
         user_answer = int(message.text.strip())
     except (ValueError, AttributeError):
         question, new_answer = make_math_question()
-        pending = await get_pending_verification(pool, message.from_user.id)
-        reserved_name = pending['reserved_name'] if pending else generate_anonymous_name()
+        reserved_name = pending['reserved_name']
         await save_pending_verification(pool, message.from_user.id, new_answer, reserved_name)
         await state.update_data(answer=new_answer)
         await message.answer(f"❌ Numbers only. Try again:\n\n<code>{question}</code>")
@@ -175,8 +181,7 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
 
     if user_answer != correct:
         question, new_answer = make_math_question()
-        pending = await get_pending_verification(pool, message.from_user.id)
-        reserved_name = pending['reserved_name'] if pending else generate_anonymous_name()
+        reserved_name = pending['reserved_name']
         await save_pending_verification(pool, message.from_user.id, new_answer, reserved_name)
         await state.update_data(answer=new_answer)
         await message.answer(f"❌ Wrong. Try this one:\n\n<code>{question}</code>")

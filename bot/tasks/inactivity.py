@@ -7,6 +7,7 @@ from aiogram.exceptions import TelegramForbiddenError
 import asyncpg
 from database import get_config, get_inactive_users, mark_user_blocked, is_session_paused
 
+from utils.helpers import format_timedelta_until, safe_error
 from utils.health import health_monitor
 
 logger = logging.getLogger(__name__)
@@ -46,4 +47,4 @@ async def check_inactivity(bot: Bot, pool: asyncpg.Pool):
                 logger.info(f"Marked {len(kicked)} users inactive.")
 
         except Exception as e:
-            logger.error(f"Inactivity check error: {repr(e)}")
+            logger.error(f"Inactivity check error: {safe_error(e)}")
