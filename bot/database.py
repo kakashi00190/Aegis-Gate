@@ -440,6 +440,7 @@ async def create_user(pool: asyncpg.Pool, user_id: int, anonymous_name: str) -> 
                         user_id, anonymous_name
                     )
                     if row:
+                        invalidate_stats_cache()
                         return row
                     # User already exists — fetch instead
                     return await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
@@ -452,8 +453,6 @@ async def create_user(pool: asyncpg.Pool, user_id: int, anonymous_name: str) -> 
         except Exception as e:
             logger.error(f"Error creating user {user_id}: {safe_error(e)}")
             raise
-    else:
-        invalidate_stats_cache()
 
 
 async def get_current_session(pool: asyncpg.Pool) -> Optional[asyncpg.Record]:
@@ -651,6 +650,8 @@ async def mark_user_unblocked(pool: asyncpg.Pool, user_id: int):
                 )
     except Exception as e:
         logger.error(f"Error marking user {user_id} as unblocked: {safe_error(e)}")
+    else:
+        invalidate_stats_cache()
 
 
 async def reset_all_blocked_status(pool: asyncpg.Pool) -> int:
@@ -662,6 +663,8 @@ async def reset_all_blocked_status(pool: asyncpg.Pool) -> int:
     except Exception as e:
         logger.error(f"Error resetting blocked status: {safe_error(e)}")
         return 0
+    else:
+        invalidate_stats_cache()
 
 
 async def get_user_rank(pool: asyncpg.Pool, user_id: int) -> int:
