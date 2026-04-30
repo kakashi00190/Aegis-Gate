@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError, TelegramBadRequest
 import asyncpg
@@ -137,23 +138,16 @@ async def delete_session_messages(bot: Bot, pool: asyncpg.Pool, session_id: int)
 
         batch_ids = [row['id'] for row in batch]
 
-        # Only try to delete from chats if sent <48h ago (Telegram API limit)
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
-        recent_rows = [row for row in batch if row.get('sent_at') and row['sent_at'] >= cutoff]
-        old_rows = [row for row in batch if row not in recent_rows]
+        # Try to delete ALL messages from chats — recent ones succeed,
+        # old ones (>48h) fail with TelegramBadRequest and get counted as skipped.
+        tasks = [
+            _delete_one_message(semaphore, bot, row['recipient_id'], row['message_id'])
+            for row in batch
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Delete recent messages from chats
-        if recent_rows:
-            tasks = [
-                _delete_one_message(semaphore, bot, row['recipient_id'], row['message_id'])
-                for row in recent_rows
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            deleted_in_batch = sum(1 for r in results if r is True)
-        else:
-            deleted_in_batch = 0
-
-        skipped_in_batch = len(recent_rows) - deleted_in_batch + len(old_rows)
+        deleted_in_batch = sum(1 for r in results if r is True)
+        skipped_in_batch = len(batch) - deleted_in_batch
 
         total_deleted += deleted_in_batch
         total_skipped += skipped_in_batch
@@ -319,24 +313,18 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
 
         batch_ids = [row['id'] for row in batch]
 
-        # Only try to delete from chats if sent <48h ago (Telegram API limit)
-        # Bots CANNOT delete messages older than 48h
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
-        recent_rows = [row for row in batch if row.get('sent_at') and row['sent_at'] >= cutoff]
-        old_rows = [row for row in batch if row not in recent_rows]
+        # Try to delete ALL messages from chats — recent ones will succeed,
+        # old ones (>48h) will fail with TelegramBadRequest and be counted as skipped.
+        # We don't preemptively skip because some messages near the 48h boundary
+        # might still be deletable, and it's better to try than to assume.
+        tasks = [
+            _delete_one_message(semaphore, bot, row['recipient_id'], row['message_id'])
+            for row in batch
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Delete recent messages from chats
-        if recent_rows:
-            tasks = [
-                _delete_one_message(semaphore, bot, row['recipient_id'], row['message_id'])
-                for row in recent_rows
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            deleted_in_batch = sum(1 for r in results if r is True)
-        else:
-            deleted_in_batch = 0
-
-        skipped_in_batch = len(recent_rows) - deleted_in_batch + len(old_rows)
+        deleted_in_batch = sum(1 for r in results if r is True)
+        skipped_in_batch = len(batch) - deleted_in_batch
 
         total_deleted += deleted_in_batch
         total_skipped += skipped_in_batch
@@ -364,7 +352,7 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
                 f"🚨 <b>EMERGENCY MEDIA WIPE</b>\n\n"
                 f"⏳ Progress: {total_processed}/{total_messages} ({pct_float:.2f}%)\n"
                 f"<code>{bar}</code>\n\n"
-                f"🗑 Chat deleted: {total_deleted} | ⏭ Too old: {total_skipped}\n"
+                f"🗑 Chat deleted: {total_deleted} | ⏭ Skipped: {total_skipped}\n"
                 f"💾 DB cleaned: {total_db_cleaned}\n"
                 f"⏱ Elapsed: {elapsed}s"
             )
@@ -382,7 +370,7 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
                     f"🚨 <b>Emergency Wipe In Progress</b>\n\n"
                     f"⏳ {total_processed}/{total_messages} ({pct_float:.2f}%)\n"
                     f"<code>{bar}</code>\n\n"
-                    f"🗑 Chat: {total_deleted} | ⏭ Old: {total_skipped} | 💾 DB: {total_db_cleaned}\n"
+                    f"🗑 Chat: {total_deleted} | ⏭ Skip: {total_skipped} | 💾 DB: {total_db_cleaned}\n"
                     f"⏱ Elapsed: {elapsed}s"
                 )
                 try:

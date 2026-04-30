@@ -523,6 +523,8 @@ async def add_media(
     except Exception as e:
         logger.error(f"Error adding media for {user_id}: {safe_error(e)}")
         return None
+    else:
+        invalidate_stats_cache()
 
 
 async def update_user_on_upload(
@@ -573,6 +575,8 @@ async def update_user_on_upload(
     except Exception as e:
         logger.error(f"Error updating user {user_id} on upload: {safe_error(e)}")
         return {}
+    else:
+        invalidate_stats_cache()
 
 
 async def activate_user(pool: asyncpg.Pool, user_id: int) -> bool:
@@ -737,16 +741,16 @@ _stats_cache = {
     'data': None,
     'timestamp': 0
 }
-STATS_CACHE_TTL = 300 # 5 minutes cache
+STATS_CACHE_TTL = 60  # 1 minute cache (was 5 min — too stale for active bots)
 
 
 def invalidate_stats_cache():
     """Reset stats cache so next read fetches fresh data. Call after mutations."""
     _stats_cache['timestamp'] = 0
 
-async def get_advanced_stats(pool: asyncpg.Pool) -> dict:
+async def get_advanced_stats(pool: asyncpg.Pool, force_refresh: bool = False) -> dict:
     now = time.time()
-    if _stats_cache['data'] and now - _stats_cache['timestamp'] < STATS_CACHE_TTL:
+    if not force_refresh and _stats_cache['data'] and now - _stats_cache['timestamp'] < STATS_CACHE_TTL:
         return _stats_cache['data']
 
     try:
@@ -834,8 +838,8 @@ async def get_advanced_stats(pool: asyncpg.Pool) -> dict:
         return {'status': 'error', 'error': str(e)}
 
 
-async def get_stats(pool: asyncpg.Pool) -> dict:
-    return await get_advanced_stats(pool)
+async def get_stats(pool: asyncpg.Pool, force_refresh: bool = False) -> dict:
+    return await get_advanced_stats(pool, force_refresh=force_refresh)
 
 
 async def get_unsolved_reports(
@@ -980,6 +984,8 @@ async def mark_media_sent(pool: asyncpg.Pool, media_ids: List[int]):
                 )
     except Exception as e:
         logger.error(f"Error marking media as sent {media_ids}: {safe_error(e)}")
+    else:
+        invalidate_stats_cache()
 
 
 async def unclaim_broadcast(pool: asyncpg.Pool, media_ids: List[int], delay_seconds: int = 30):
@@ -996,6 +1002,8 @@ async def unclaim_broadcast(pool: asyncpg.Pool, media_ids: List[int], delay_seco
                 )
     except Exception as e:
         logger.error(f"Error unclaiming media {media_ids}: {safe_error(e)}")
+    else:
+        invalidate_stats_cache()
 
 
 async def get_inactive_users(pool: asyncpg.Pool, cutoff: datetime) -> List[asyncpg.Record]:

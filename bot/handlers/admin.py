@@ -124,12 +124,13 @@ async def admin_stats(callback: CallbackQuery, pool: asyncpg.Pool):
     if not is_admin(callback.from_user.id):
         return
 
+    await callback.answer("Refreshing...")
+
     loading = await _show_loading(callback, "Loading stats")
-    await callback.answer()
 
     try:
         async with asyncio.timeout(12): # slightly longer than db timeout
-            s = await get_advanced_stats(pool)
+            s = await get_advanced_stats(pool, force_refresh=True)
     except asyncio.TimeoutError:
         await loading.edit_text(
             "⚠️ <b>Stats Loading Timeout</b>\n\nThe database took too long to respond. Please try again in a few moments.",
