@@ -1282,7 +1282,7 @@ async def get_session_sent_messages_batch(
         async with asyncio.timeout(15):
             async with pool.acquire() as conn:
                 return await conn.fetch(
-                    "SELECT id, recipient_id, message_id FROM sent_messages "
+                    "SELECT id, recipient_id, message_id, sent_at FROM sent_messages "
                     "WHERE session_id = $1 ORDER BY id ASC LIMIT $2 OFFSET $3",
                     session_id, limit, offset
                 )
@@ -1373,7 +1373,7 @@ async def get_all_sent_messages_batch(
 ) -> List[asyncpg.Record]:
     async with pool.acquire() as conn:
         return await conn.fetch(
-            "SELECT id, recipient_id, message_id FROM sent_messages "
+            "SELECT id, recipient_id, message_id, sent_at FROM sent_messages "
             "ORDER BY id ASC LIMIT $1",
             limit
         )
