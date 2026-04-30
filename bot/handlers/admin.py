@@ -149,8 +149,8 @@ async def admin_stats(callback: CallbackQuery, pool: asyncpg.Pool):
     config = await get_config(pool)
 
     total = s['total']
-    # Active percentage based on total users (not including unverified)
-    active_pct = round(s['active'] / s['total_users'] * 100) if s['total_users'] > 0 else 0
+    # Active percentage based on total (all users including unverified)
+    active_pct = round(s['active'] / total * 100) if total > 0 else 0
 
     paused, pause_until = await is_session_paused(pool)
 
@@ -168,7 +168,7 @@ async def admin_stats(callback: CallbackQuery, pool: asyncpg.Pool):
             ends_in = format_timedelta_until(session_end)
             session_line = (
                 f"\n🏆 <b>Session #{session.get('session_number', '?')}</b>\n"
-                f"  Running: {days_running}d | Ends in: {ends_in}"
+                f"  Running: {days_running}d | Duration: {duration_days}d | Ends in: {ends_in}"
             )
             if paused:
                 session_line += f"\n  ⏸ Paused — resumes in {format_timedelta_until(pause_until)}"
