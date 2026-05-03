@@ -305,7 +305,7 @@ async def stay_opted_out(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-@router.message(Command(), OnboardingState.disclaimer, OnboardingState.terms)
+@router.message(F.text.startswith('/'), OnboardingState.disclaimer, OnboardingState.terms)
 async def onboarding_command_override(message: Message, state: FSMContext):
     """Allow commands like /admin to work even during onboarding states."""
     await state.clear()
