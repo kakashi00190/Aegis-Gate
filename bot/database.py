@@ -144,6 +144,11 @@ async def init_db(pool: asyncpg.Pool):
             "SELECT 1 FROM pg_indexes WHERE indexname='idx_users_lifetime_media'",
             "CREATE INDEX idx_users_lifetime_media ON users(total_media_lifetime DESC)",
             "idx_users_lifetime_media"
+        ),
+        (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='opted_out'",
+            "ALTER TABLE users ADD COLUMN opted_out BOOLEAN DEFAULT FALSE",
+            "users_opted_out"
         )
     ]
 
@@ -667,6 +672,22 @@ async def reset_all_blocked_status(pool: asyncpg.Pool) -> int:
         invalidate_stats_cache()
 
 
+async def set_user_opted_out(pool: asyncpg.Pool, user_id: int, opted_out: bool) -> bool:
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                result = await conn.execute(
+                    "UPDATE users SET opted_out = $2 WHERE id = $1",
+                    user_id, opted_out
+                )
+                return result.endswith("1")
+    except Exception as e:
+        logger.error(f"Error setting opted_out for {user_id}: {safe_error(e)}")
+        return False
+    else:
+        invalidate_stats_cache()
+
+
 async def get_user_rank(pool: asyncpg.Pool, user_id: int) -> int:
     try:
         async with asyncio.timeout(5):
@@ -708,7 +729,7 @@ async def get_all_active_users(pool: asyncpg.Pool) -> List[asyncpg.Record]:
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 return await conn.fetch(
-                    "SELECT id FROM users WHERE status = 'active' AND bot_blocked = FALSE"
+                    "SELECT id FROM users WHERE status = 'active' AND bot_blocked = FALSE AND opted_out = FALSE"
                 )
     except Exception as e:
         logger.error(f"Error fetching active users: {safe_error(e)}")
@@ -720,7 +741,7 @@ async def count_active_users(pool: asyncpg.Pool) -> int:
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 return await conn.fetchval(
-                    "SELECT COUNT(*) FROM users WHERE status = 'active' AND bot_blocked = FALSE"
+                    "SELECT COUNT(*) FROM users WHERE status = 'active' AND bot_blocked = FALSE AND opted_out = FALSE"
                 )
     except Exception as e:
         logger.error(f"Error counting active users: {safe_error(e)}")
@@ -732,7 +753,7 @@ async def get_all_notifiable_users(pool: asyncpg.Pool) -> List[asyncpg.Record]:
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 return await conn.fetch(
-                    "SELECT id, status FROM users WHERE status NOT IN ('banned') AND bot_blocked = FALSE"
+                    "SELECT id, status FROM users WHERE status NOT IN ('banned') AND bot_blocked = FALSE AND opted_out = FALSE"
                 )
     except Exception as e:
         logger.error(f"Error fetching notifiable users: {safe_error(e)}")
@@ -763,11 +784,12 @@ async def get_advanced_stats(pool: asyncpg.Pool, force_refresh: bool = False) ->
                 user_stats = await conn.fetchrow("""
                     SELECT 
                         COUNT(*) as total_users,
-                        COUNT(*) FILTER (WHERE status = 'active' AND bot_blocked = FALSE) as active_count,
+                        COUNT(*) FILTER (WHERE status = 'active' AND bot_blocked = FALSE AND opted_out = FALSE) as active_count,
                         COUNT(*) FILTER (WHERE status = 'inactive' AND bot_blocked = FALSE) as inactive_count,
                         COUNT(*) FILTER (WHERE status = 'pending' AND bot_blocked = FALSE) as pending_count,
                         COUNT(*) FILTER (WHERE status = 'banned') as banned_count,
                         COUNT(*) FILTER (WHERE bot_blocked = TRUE) as blocked_count,
+                        COUNT(*) FILTER (WHERE opted_out = TRUE) as opted_out_count,
                         COUNT(*) FILTER (WHERE last_activity_at > NOW() - INTERVAL '24 hours' AND bot_blocked = FALSE) as active_24h,
                         COUNT(*) FILTER (WHERE joined_at > NOW() - INTERVAL '24 hours') as joined_today,
                         COUNT(*) FILTER (WHERE joined_at > NOW() - INTERVAL '7 days') as joined_7d,
@@ -813,6 +835,7 @@ async def get_advanced_stats(pool: asyncpg.Pool, force_refresh: bool = False) ->
                     'pending': user_stats['pending_count'] or 0,
                     'banned': user_stats['banned_count'] or 0,
                     'blocked_bot': user_stats['blocked_count'] or 0,
+                    'opted_out': user_stats['opted_out_count'] or 0,
                     'unverified': unverified,
                     'active_24h': int(user_stats['active_24h'] or 0),
                     'joined_today': int(user_stats['joined_today'] or 0),
@@ -1349,7 +1372,7 @@ async def get_wipe_stats(pool: asyncpg.Pool) -> dict:
                 ) or 0
 
                 active_users = await conn.fetchval(
-                    "SELECT COUNT(*) FROM users WHERE status = 'active' AND bot_blocked = FALSE"
+                    "SELECT COUNT(*) FROM users WHERE status = 'active' AND bot_blocked = FALSE AND opted_out = FALSE"
                 ) or 0
 
                 total_users = await conn.fetchval(

@@ -191,7 +191,7 @@ async def admin_stats(callback: CallbackQuery, pool: asyncpg.Pool):
         f"  🟢 Active: {s['active']} ({active_pct}%)\n"
         f"  🔴 Inactive: {s['inactive']} | ⏳ Pending: {s['pending']}\n"
         f"  ⛔ Banned: {s['banned']} | 🚫 Blocked bot: {s['blocked_bot']}\n"
-        f"  🔐 Unverified: {s['unverified']}\n"
+        f"  🔐 Unverified: {s['unverified']} | ⏹ Opted out: {s['opted_out']}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "📈 <b>Activity</b>\n"
         f"  Active last 24h: {s['active_24h']}\n"

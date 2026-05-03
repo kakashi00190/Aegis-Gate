@@ -8,7 +8,8 @@ import asyncpg
 from database import (
     get_user, get_user_by_id_or_name, get_user_rank,
     get_leaderboard, get_config, get_current_session, is_session_paused,
-    create_report, set_report_admin_message, DatabaseError
+    create_report, set_report_admin_message, DatabaseError,
+    set_user_opted_out
 )
 from utils.helpers import (
     get_badge_display, get_all_badges, format_datetime,
@@ -260,6 +261,52 @@ async def cmd_report(message: Message, pool: asyncpg.Pool, bot: Bot):
     await message.answer("🚨 Report submitted successfully. Thank you.")
 
 
+TERMS_TEXT = (
+    "📜 <b>Terms of Use</b>\n\n"
+    "By using this bot, you agree to the following:\n\n"
+    "• Content you upload <b>will be shared with other active users</b> automatically\n"
+    "• You may <b>receive content from other users</b> automatically\n"
+    "• Some content may be sensitive or inappropriate\n"
+    "• You are responsible for anything you upload — <b>no illegal or harmful material</b>\n\n"
+    "Controls available to you:\n"
+    "• /stop — Stop receiving content at any time\n"
+    "• /start — Resume participation\n"
+    "• /report — Flag inappropriate content\n\n"
+    "Failure to follow these rules may result in restrictions or removal from the service.\n\n"
+    "By continuing, you confirm that you understand and accept these terms."
+)
+
+
+@router.message(Command("stop"))
+async def cmd_stop(message: Message, pool: asyncpg.Pool):
+    try:
+        user = await get_user(pool, message.from_user.id)
+    except DatabaseError:
+        await message.answer("⚠️ Database is busy. Please try again in a moment.")
+        return
+    if not user:
+        await message.answer("⚠️ You are not registered. Use /start to begin.")
+        return
+
+    if user.get('opted_out'):
+        await message.answer("⏹ You are already opted out of receiving content.\n\nUse /start to resume.")
+        return
+
+    await set_user_opted_out(pool, message.from_user.id, True)
+    await message.answer(
+        "⏹ <b>You have opted out of receiving content.</b>\n\n"
+        "You will no longer receive media from other users.\n"
+        "Your uploads and stats are preserved.\n\n"
+        "Use /start to resume at any time.",
+        parse_mode="HTML"
+    )
+
+
+@router.message(Command("terms"))
+async def cmd_terms(message: Message):
+    await message.answer(TERMS_TEXT, parse_mode="HTML")
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message, pool: asyncpg.Pool):
     config = await get_config(pool)
@@ -271,6 +318,8 @@ async def cmd_help(message: Message, pool: asyncpg.Pool):
     await message.answer(
         "📖 <b>Commands</b>\n\n"
         "/start — Register or check your status\n"
+        "/stop — Stop receiving content at any time\n"
+        "/terms — View terms of use\n"
         "/me — Your full profile, EXP, and badges\n"
         "/inspect &lt;name/ID&gt; — View any user's profile\n"
         "/leaderboard — Session top rankings\n"
