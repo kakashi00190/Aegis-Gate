@@ -248,8 +248,13 @@ async def terms_accept(callback: CallbackQuery, state: FSMContext, pool: asyncpg
 
     user_id = callback.from_user.id
 
-    # Don't edit the pinned terms message at all — it stays pinned as-is
-    # Send verification as a NEW message below it
+    # Remove the "I Accept" button from the pinned terms message (keep it pinned)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # Send verification as a NEW message below the pinned terms
     name = generate_anonymous_name()
     attempts = 0
     while await name_exists(pool, name) and attempts < 20:
