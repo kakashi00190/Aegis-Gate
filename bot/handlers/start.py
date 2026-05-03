@@ -248,7 +248,13 @@ async def terms_accept(callback: CallbackQuery, state: FSMContext, pool: asyncpg
 
     user_id = callback.from_user.id
 
-    # Proceed to verification
+    # Remove the accept button from the pinned terms message (keep it pinned)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # Proceed to verification — send as NEW message so terms stays pinned
     name = generate_anonymous_name()
     attempts = 0
     while await name_exists(pool, name) and attempts < 20:
@@ -260,7 +266,7 @@ async def terms_accept(callback: CallbackQuery, state: FSMContext, pool: asyncpg
     await state.set_state(VerificationState.waiting_answer)
     await state.update_data(answer=answer)
 
-    await callback.message.edit_text(
+    await callback.message.answer(
         "🔐 <b>Verification Required</b>\n\n"
         f"Solve this to continue:\n\n"
         f"<code>{question}</code>\n\n"
@@ -304,7 +310,7 @@ async def stay_opted_out(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-@router.message(VerificationState.waiting_answer)
+@router.message(VerificationState.waiting_answer, ~F.text.startswith('/'))
 async def process_verification(message: Message, state: FSMContext, pool: asyncpg.Pool):
     # Read answer from DB (not FSM) so verification survives bot restarts
     pending = await get_pending_verification(pool, message.from_user.id)
