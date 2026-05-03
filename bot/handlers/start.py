@@ -2,7 +2,7 @@ import random
 import logging
 import time
 from aiogram import Router, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -248,13 +248,8 @@ async def terms_accept(callback: CallbackQuery, state: FSMContext, pool: asyncpg
 
     user_id = callback.from_user.id
 
-    # Remove the accept button from the pinned terms message (keep it pinned)
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    # Proceed to verification — send as NEW message so terms stays pinned
+    # Don't edit the pinned terms message at all — it stays pinned as-is
+    # Send verification as a NEW message below it
     name = generate_anonymous_name()
     attempts = 0
     while await name_exists(pool, name) and attempts < 20:
@@ -307,6 +302,12 @@ async def stay_opted_out(callback: CallbackQuery, state: FSMContext):
         "You remain opted out. Use /start anytime to resume.",
         parse_mode="HTML"
     )
+    await state.clear()
+
+
+@router.message(Command(), OnboardingState.disclaimer, OnboardingState.terms)
+async def onboarding_command_override(message: Message, state: FSMContext):
+    """Allow commands like /admin to work even during onboarding states."""
     await state.clear()
 
 
