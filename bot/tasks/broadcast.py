@@ -34,11 +34,11 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
     except Exception as e:
         logger.error(f"Error in _local_store_sent_messages_batch: {safe_error(e)}")
 
-SEND_CONCURRENCY = 10
-SEND_DELAY_BASE = 0.08
+SEND_CONCURRENCY = 5
+SEND_DELAY_BASE = 0.15
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 10
+CHUNK_SIZE = 5
 
 _active_users_cache = {
     'users': [],
@@ -237,6 +237,11 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
             else:
                 fail_count += 1
 
+        # Breathing room between chunks to let the rate limiter recover
+        # and allow handler responses to get through
+        if i + CHUNK_SIZE < total_targets:
+            await asyncio.sleep(0.3)
+
     elapsed = round(time.monotonic() - start_time, 1)
     type_label = "album" if len(media_items) > 1 else "media"
     
@@ -301,11 +306,10 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                     grouped_media[group_key] = []
                 grouped_media[group_key].append(dict(item))
 
-            tasks = [
-                broadcast_item(bot, pool, items, recipients, semaphore)
-                for items in grouped_media.values()
-            ]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Process broadcast items sequentially to avoid overwhelming the rate limiter
+            # when many grouped items are claimed at once
+            for items in grouped_media.values():
+                await broadcast_item(bot, pool, items, recipients, semaphore)
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {safe_error(e)}")

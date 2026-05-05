@@ -1,7 +1,9 @@
 import logging
 import time
+import asyncio
 from aiogram import Router, F, Bot
 from aiogram.types import Message
+from aiogram.exceptions import TelegramRetryAfter
 
 import asyncpg
 from database import (
@@ -14,6 +16,36 @@ from config import is_admin
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+async def _safe_answer(message: Message, text: str, **kwargs):
+    """Send a message.answer() with TelegramRetryAfter handling."""
+    try:
+        await message.answer(text, **kwargs)
+    except TelegramRetryAfter as e:
+        logger.warning(f"Flood control on handler reply, waiting {e.retry_after}s")
+        await asyncio.sleep(e.retry_after)
+        try:
+            await message.answer(text, **kwargs)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+async def _safe_send(bot: Bot, chat_id: int, text: str, **kwargs):
+    """Send a bot.send_message() with TelegramRetryAfter handling."""
+    try:
+        await bot.send_message(chat_id, text, **kwargs)
+    except TelegramRetryAfter as e:
+        logger.warning(f"Flood control on bot send, waiting {e.retry_after}s")
+        await asyncio.sleep(e.retry_after)
+        try:
+            await bot.send_message(chat_id, text, **kwargs)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 _pause_cooldowns: dict[int, float] = {}
 _upload_cooldowns: dict[int, list[float]] = {} # user_id -> [timestamps]
@@ -63,7 +95,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
     # 2. Get User, Session, and Config in ONE optimized call
     context = await get_upload_context(pool, user_id)
     if not context['success']:
-        await message.answer("⚠️ Database is busy. Please try again in a moment.")
+        await _safe_answer(message, "⚠️ Database is busy. Please try again in a moment.")
         return
 
     user = context['user']
@@ -71,11 +103,11 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
     config = context['config']
 
     if not user:
-        await message.answer("⚠️ You are not registered. Use /start to begin.")
+        await _safe_answer(message, "⚠️ You are not registered. Use /start to begin.")
         return
 
     if user['status'] == 'banned':
-        await message.answer("🚫 You are banned from this bot.")
+        await _safe_answer(message, "🚫 You are banned from this bot.")
         return
 
     chat_id = message.chat.id
@@ -85,8 +117,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
             await message.delete()
         except Exception:
             pass
-        await bot.send_message(
-            chat_id,
+        await _safe_send(bot, chat_id,
             "🚫 <b>Caption rejected.</b> Links, usernames, and URLs are not allowed.\n"
             "Remove them and try again.",
             parse_mode="HTML"
@@ -116,8 +147,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         if now_ts - _pause_cooldowns.get(user_id, 0) > 60:
             _pause_cooldowns[user_id] = now_ts
             time_left = format_timedelta_until(pause_until)
-            await bot.send_message(
-                chat_id,
+            await _safe_send(bot, chat_id,
                 f"⏸ <b>Uploads are paused.</b>\n\n"
                 f"Session is transitioning. Media is being wiped.\n"
                 f"Uploads resume in <b>{time_left}</b>.",
@@ -127,7 +157,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
 
     if message.content_type not in {'photo', 'video', 'document'}:
         # Notify about unsupported media types (but don't delete unless paused)
-        await message.answer(
+        await _safe_answer(message,
             "⚠️ <b>Unsupported media type.</b>\n\n"
             "Only photos, videos, and documents are shared with other users.",
             parse_mode="HTML"
@@ -148,12 +178,13 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         media_type = 'document'
 
     if not session:
-        await message.answer("⚠️ No active session. Please try again later.")
+        await _safe_answer(message, "⚠️ No active session. Please try again later.")
         return
 
     activation_threshold = int(config.get('activation_threshold', '10'))
     reactivation_threshold = int(config.get('reactivation_threshold', '3'))
     delay = int(config.get('broadcast_delay_seconds', '30'))
+    logger.info(f"Broadcast delay from config: {delay}s (raw: '{config.get('broadcast_delay_seconds', '30')}')")
 
     session_id = session['id']
     media_group_id = message.media_group_id
@@ -177,7 +208,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                     file_id, file_unique_id, media_type, 
                     delay, media_group_id
                 )
-                await message.answer(
+                await _safe_answer(message,
                     "✅ <b>You are now active!</b>\n\n"
                     "You will start receiving media from other users.\n"
                     "Inactivity timer has started — keep uploading to stay active.",
@@ -187,13 +218,13 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
             remaining = activation_threshold - new_total
             # Only notify every 5 uploads to avoid flooding user in high-volume bursts
             if new_total % 5 == 0 or remaining < 3:
-                await message.answer(
+                await _safe_answer(message,
                     f"📤 <b>Upload received!</b> {new_total}/{activation_threshold}\n"
                     f"Upload <b>{remaining}</b> more file(s) to activate your account.",
                     parse_mode="HTML"
                 )
         if level_up:
-            await message.answer(
+            await _safe_answer(message,
                 f"🎉 <b>Level Up!</b> You are now <b>Level {new_level}</b>.",
                 parse_mode="HTML"
             )
@@ -209,7 +240,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                     file_id, file_unique_id, media_type, 
                     delay, media_group_id
                 )
-                await message.answer(
+                await _safe_answer(message,
                     "✅ <b>You have been reactivated!</b>\n\n"
                     "You will receive media from other users again.\n"
                     "Inactivity timer has restarted.",
@@ -219,13 +250,13 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
             remaining = reactivation_threshold - count
             # Only notify once during reactivation burst
             if count == 1:
-                await message.answer(
+                await _safe_answer(message,
                     f"📤 <b>Upload received!</b> {count}/{reactivation_threshold}\n"
                     f"Upload <b>{remaining}</b> more file(s) to reactivate your account.",
                     parse_mode="HTML"
                 )
         if level_up:
-            await message.answer(
+            await _safe_answer(message,
                 f"🎉 <b>Level Up!</b> You are now <b>Level {new_level}</b>.",
                 parse_mode="HTML"
             )
@@ -238,7 +269,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
             delay, media_group_id
         )
         if level_up:
-            await message.answer(
+            await _safe_answer(message,
                 f"🎉 <b>Level Up!</b> You are now <b>Level {new_level}</b>.",
                 parse_mode="HTML"
             )

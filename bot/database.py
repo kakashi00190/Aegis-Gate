@@ -157,8 +157,13 @@ async def init_db(pool: asyncpg.Pool):
         ),
         (
             "SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='referred_by'",
-            "ALTER TABLE users ADD COLUMN referred_by INTEGER REFERENCES users(id)",
+            "ALTER TABLE users ADD COLUMN referred_by BIGINT REFERENCES users(id)",
             "users_referred_by"
+        ),
+        (
+            "SELECT data_type FROM information_schema.columns WHERE table_name='users' AND column_name='referred_by' AND data_type='integer'",
+            "ALTER TABLE users ALTER COLUMN referred_by TYPE BIGINT",
+            "users_referred_by_bigint"
         )
     ]
 
@@ -720,7 +725,7 @@ async def get_user_by_referral_code(pool: asyncpg.Pool, code: str) -> Optional[a
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 return await conn.fetchrow(
-                    "SELECT id FROM users WHERE referral_code = $1", code
+                    "SELECT * FROM users WHERE referral_code = $1", code
                 )
     except Exception as e:
         logger.error(f"Error fetching referral code {code}: {safe_error(e)}")

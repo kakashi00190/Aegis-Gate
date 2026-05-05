@@ -11,6 +11,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramRetryAfter
 
 import config
 from validate_env import main as validate_environment
@@ -205,6 +206,15 @@ async def main():
 
     dp = Dispatcher(storage=MemoryStorage())
     dp["pool"] = pool
+
+    # Global error handler for flood control — prevents unhandled TelegramRetryAfter crashes
+    @dp.error()
+    async def on_error(event, exception):
+        if isinstance(exception, TelegramRetryAfter):
+            logger.warning(f"Global flood control caught: retry after {exception.retry_after}s. Ignoring.")
+            return True
+        logger.error(f"Unhandled error in dispatcher: {safe_error(exception)}")
+        return True
 
     dp.include_router(start.router)
     dp.include_router(media.router)
