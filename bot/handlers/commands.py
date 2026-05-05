@@ -2,14 +2,14 @@ import logging
 from datetime import datetime, timedelta, timezone
 from aiogram import Router, Bot
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 import asyncpg
 from database import (
     get_user, get_user_by_id_or_name, get_user_rank,
     get_leaderboard, get_config, get_current_session, is_session_paused,
     create_report, set_report_admin_message, DatabaseError,
-    set_user_opted_out
+    set_user_opted_out, get_invite_key, get_referral_count
 )
 from utils.helpers import (
     get_badge_display, get_all_badges, format_datetime,
@@ -307,6 +307,39 @@ async def cmd_terms(message: Message):
     await message.answer(TERMS_TEXT, parse_mode="HTML")
 
 
+@router.message(Command("referral"))
+async def cmd_referral(message: Message, pool: asyncpg.Pool):
+    try:
+        user = await get_user(pool, message.from_user.id)
+    except DatabaseError:
+        await message.answer("⚠️ Database is busy. Please try again in a moment.")
+        return
+    if not user:
+        await message.answer("⚠️ You are not registered. Use /start to begin.")
+        return
+
+    ref_code = user.get('referral_code')
+    if not ref_code:
+        await message.answer("⚠️ Referral not available yet. Please try again later.")
+        return
+
+    invite_key = await get_invite_key(pool)
+    bot_username = (await message.bot.get_me()).username
+    link = f"https://t.me/{bot_username}?start={invite_key}_{ref_code}"
+    count = await get_referral_count(pool, message.from_user.id)
+
+    await message.answer(
+        "🔗 <b>Your Invite Link</b>\n\n"
+        f"<code>{link}</code>\n\n"
+        f"📊 <b>{count}</b> user{'s' if count != 1 else ''} joined via your link\n\n"
+        "Share it with friends to grow the community! 🚀",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Copy Link", callback_data="copy_referral_link")]
+        ])
+    )
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message, pool: asyncpg.Pool):
     config = await get_config(pool)
@@ -320,6 +353,7 @@ async def cmd_help(message: Message, pool: asyncpg.Pool):
         "/start — Register or check your status\n"
         "/stop — Stop receiving content at any time\n"
         "/terms — View terms of use\n"
+        "/referral — Get your invite link\n"
         "/me — Your full profile, EXP, and badges\n"
         "/inspect &lt;name/ID&gt; — View any user's profile\n"
         "/leaderboard — Session top rankings\n"

@@ -16,7 +16,8 @@ from database import (
     solve_report, get_user, get_user_by_id_or_name, ban_user, unban_user,
     get_current_session, end_session, get_session_stats, is_session_paused,
     create_report, set_report_admin_message, mark_user_blocked,
-    get_wipe_stats, reset_all_blocked_status, DatabaseError
+    get_wipe_stats, reset_all_blocked_status, DatabaseError,
+    get_invite_key, set_invite_key
 )
 from utils.helpers import format_datetime, format_timedelta_until, get_all_badges, safe_error
 from utils.session_announce import broadcast_session_results
@@ -277,6 +278,10 @@ async def admin_settings(callback: CallbackQuery, pool: asyncpg.Pool):
             text=f"🔄 Uploads to Reactivate: {cfg.get('reactivation_threshold', '3')}",
             callback_data="admin_set_reactivation_threshold"
         )],
+        [InlineKeyboardButton(
+            text=f"🔑 Invite Key: {cfg.get('invite_key', 'aegis2026')}",
+            callback_data="admin_invite_key"
+        )],
         [InlineKeyboardButton(text="◀️ Back", callback_data="admin_main")],
     ])
     try:
@@ -287,6 +292,56 @@ async def admin_settings(callback: CallbackQuery, pool: asyncpg.Pool):
         except Exception:
             pass
         await callback.message.answer("⚙️ <b>Settings</b>\n\nTap a setting to change its value.", parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "admin_invite_key")
+async def admin_invite_key(callback: CallbackQuery, pool: asyncpg.Pool):
+    if not is_admin(callback.from_user.id):
+        return
+    invite_key = await get_invite_key(pool)
+    bot_username = (await callback.bot.get_me()).username
+    link = f"https://t.me/{bot_username}?start={invite_key}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Generate New Key", callback_data="admin_invite_key_rotate")],
+        [InlineKeyboardButton(text="◀️ Back", callback_data="admin_settings")],
+    ])
+    await _send_fresh(
+        callback,
+        f"🔑 <b>Invite Key</b>\n\n"
+        f"Current key: <code>{invite_key}</code>\n\n"
+        f"📢 <b>Admin Invite Link:</b>\n"
+        f"<code>{link}</code>\n\n"
+        f"⚠️ Rotating the key will NOT affect existing users.\n"
+        f"Only new signups will need the new key.",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_invite_key_rotate")
+async def admin_invite_key_rotate(callback: CallbackQuery, pool: asyncpg.Pool):
+    if not is_admin(callback.from_user.id):
+        return
+    import secrets
+    new_key = secrets.token_urlsafe(8)[:10]
+    await set_invite_key(pool, new_key)
+    bot_username = (await callback.bot.get_me()).username
+    link = f"https://t.me/{bot_username}?start={new_key}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Generate New Key", callback_data="admin_invite_key_rotate")],
+        [InlineKeyboardButton(text="◀️ Back", callback_data="admin_settings")],
+    ])
+    await _send_fresh(
+        callback,
+        f"🔑 <b>Invite Key Rotated!</b>\n\n"
+        f"New key: <code>{new_key}</code>\n\n"
+        f"📢 <b>New Admin Invite Link:</b>\n"
+        f"<code>{link}</code>\n\n"
+        f"⚠️ Old links are now invalid.\n"
+        f"Existing users are unaffected.",
+        reply_markup=kb
+    )
+    await callback.answer("✅ Key rotated!")
 
 
 @router.callback_query(F.data.startswith("admin_set_"))

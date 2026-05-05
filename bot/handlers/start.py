@@ -1,6 +1,8 @@
 import random
 import logging
 import time
+import asyncio
+import string
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -12,7 +14,8 @@ from database import (
     get_user, create_user, name_exists, get_config, mark_user_unblocked,
     save_pending_verification, get_pending_verification, clear_pending_verification,
     is_session_paused, get_start_context, get_verification_context,
-    set_user_opted_out
+    set_user_opted_out, get_invite_key, set_referral_code,
+    get_user_by_referral_code, set_referred_by, get_referral_count
 )
 from utils.names import generate_anonymous_name
 from utils.helpers import format_timedelta_until
@@ -23,6 +26,7 @@ router = Router()
 _start_cooldowns: dict[int, float] = {}
 START_COOLDOWN = 5
 COOLDOWN_TTL = 600
+BOT_USERNAME = None
 
 DISCLAIMER_TEXT = (
     "🌐 <b>Disclaimer</b>\n\n"
@@ -56,6 +60,10 @@ def _cleanup_cooldowns():
         del _start_cooldowns[k]
 
 
+def _generate_referral_code() -> str:
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+
 class OnboardingState(StatesGroup):
     disclaimer = State()
     terms = State()
@@ -83,6 +91,7 @@ def make_math_question() -> tuple[str, int]:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
+    global BOT_USERNAME
     user_id = message.from_user.id
 
     now = time.time()
@@ -90,6 +99,17 @@ async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
     if now - _start_cooldowns.get(user_id, 0) < START_COOLDOWN:
         return
     _start_cooldowns[user_id] = now
+
+    # Cache bot username
+    if BOT_USERNAME is None:
+        try:
+            bot_info = await message.bot.get_me()
+            BOT_USERNAME = bot_info.username
+        except Exception:
+            BOT_USERNAME = "Aegis10Gatebot"
+
+    # Parse deeplink payload
+    args = message.text.split(maxsplit=1)[1].strip() if len(message.text.split()) > 1 else ""
 
     # 1. Fetch User, Pending, Session, and Config in ONE optimized call
     context = await get_start_context(pool, user_id)
@@ -173,22 +193,52 @@ async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
 
     # --- NEW USER FLOW ---
 
+    # Invite key gate: new users MUST provide a valid key via deeplink
+    invite_key = await get_invite_key(pool)
+
+    if not args:
+        await message.answer(
+            "🔒 <b>This bot is invite-only</b>\n\n"
+            "You need an invite link to join.\n"
+            "Ask someone who's already in to share their link!",
+            parse_mode="HTML"
+        )
+        return
+
+    # Parse key and optional referral code from deeplink
+    # Format: invite_key  or  invite_key_REFERRALCODE
+    parts = args.split("_", 1)
+    provided_key = parts[0]
+    referral_code = parts[1] if len(parts) > 1 else None
+
+    if provided_key != invite_key:
+        await message.answer(
+            "❌ <b>Invalid invite key</b>\n\n"
+            "The link you used is not valid. Please get a fresh invite link.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Store referral info in FSM for later use after verification
+    await state.update_data(referral_code=referral_code)
+
     if pending:
         # User already passed disclaimer/terms but is mid-verification
         reserved_name = pending['reserved_name']
         question, new_answer = make_math_question()
         await save_pending_verification(pool, user_id, new_answer, reserved_name)
         await state.set_state(VerificationState.waiting_answer)
-        await state.update_data(answer=new_answer)
+        await state.update_data(answer=new_answer, referral_code=referral_code)
         await message.answer(
             "🔐 <b>Verification Required</b>\n\n"
             f"Solve this to continue:\n\n"
             f"<code>{question}</code>\n\n"
-            "Reply with the number only."
+            "Reply with the number only.",
+            parse_mode="HTML"
         )
         return
 
-    # Brand new user — show disclaimer first
+    # Brand new user with valid key — show disclaimer first
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Yes, Continue", callback_data="disclaimer_accept"),
@@ -366,11 +416,45 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
 
     threshold = int(config.get('activation_threshold', '10'))
 
+    # --- Activation Animation ---
+    anim1 = await message.answer("🔄 <b>Activating your account</b> ⠋", parse_mode="HTML")
+    await asyncio.sleep(0.4)
+    await anim1.edit_text("🔄 <b>Activating your account</b> ⠙", parse_mode="HTML")
+    await asyncio.sleep(0.4)
+    await anim1.edit_text("🔄 <b>Activating your account</b> ⠹", parse_mode="HTML")
+    await asyncio.sleep(0.4)
+    await anim1.edit_text("🔄 <b>Activating your account</b> ⠸", parse_mode="HTML")
+    await asyncio.sleep(0.4)
+
+    # Create user
     await create_user(pool, message.from_user.id, name)
     await clear_pending_verification(pool, message.from_user.id)
 
+    # Generate and assign referral code
+    ref_code = _generate_referral_code()
+    for _ in range(10):
+        existing = await get_user_by_referral_code(pool, ref_code)
+        if not existing:
+            break
+        ref_code = _generate_referral_code()
+    await set_referral_code(pool, message.from_user.id, ref_code)
+
+    # Handle referral tracking from FSM data
+    data = await state.get_data()
+    referral_code_from_link = data.get('referral_code')
+    if referral_code_from_link:
+        referrer = await get_user_by_referral_code(pool, referral_code_from_link)
+        if referrer and referrer['id'] != message.from_user.id:
+            await set_referred_by(pool, message.from_user.id, referrer['id'])
+
+    # Final animation frame
+    await anim1.edit_text("✅ <b>Account Activated!</b>", parse_mode="HTML")
+    await asyncio.sleep(0.6)
+    await anim1.delete()
+
+    # Welcome message
     await message.answer(
-        f"✅ <b>Verified!</b>\n\n"
+        f"🎉 <b>Welcome aboard, {name}!</b>\n\n"
         f"Your anonymous identity: <b>{name}</b>\n"
         f"This name is permanent and cannot be changed.\n\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -378,5 +462,26 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
         f"Upload <b>{threshold} media files</b> (photos, videos, or documents).\n\n"
         f"⚠️ Captions with links will be rejected.\n"
         f"Once active, you will receive media from other users.\n\n"
-        f"Use /help to see all commands."
+        f"Use /help to see all commands.",
+        parse_mode="HTML"
     )
+
+    # Send referral card
+    invite_key = await get_invite_key(pool)
+    link = f"https://t.me/{BOT_USERNAME}?start={invite_key}_{ref_code}"
+    await message.answer(
+        "🎁 <b>Invite Friends & Earn</b>\n\n"
+        "🔗 <b>Your Personal Invite Link</b>\n\n"
+        f"<code>{link}</code>\n\n"
+        "📊 <b>0</b> users joined via your link\n\n"
+        "Share it with friends to grow the community! 🚀",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Copy Link", callback_data="copy_referral_link")]
+        ])
+    )
+
+
+@router.callback_query(F.data == "copy_referral_link")
+async def copy_referral_link(callback: CallbackQuery):
+    await callback.answer("📋 Link copied to clipboard!")

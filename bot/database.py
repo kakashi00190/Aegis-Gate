@@ -149,6 +149,16 @@ async def init_db(pool: asyncpg.Pool):
             "SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='opted_out'",
             "ALTER TABLE users ADD COLUMN opted_out BOOLEAN DEFAULT FALSE",
             "users_opted_out"
+        ),
+        (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='referral_code'",
+            "ALTER TABLE users ADD COLUMN referral_code VARCHAR(8) UNIQUE",
+            "users_referral_code"
+        ),
+        (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='referred_by'",
+            "ALTER TABLE users ADD COLUMN referred_by INTEGER REFERENCES users(id)",
+            "users_referred_by"
         )
     ]
 
@@ -196,7 +206,8 @@ async def init_db(pool: asyncpg.Pool):
                                 ('leaderboard_top', '10'),
                                 ('session_pause_hours', '3'),
                                 ('activation_threshold', '10'),
-                                ('reactivation_threshold', '3')
+                                ('reactivation_threshold', '3'),
+                                ('invite_key', 'aegis2026')
                             ON CONFLICT (key) DO NOTHING
                         """)
                         await conn.execute(
@@ -686,6 +697,86 @@ async def set_user_opted_out(pool: asyncpg.Pool, user_id: int, opted_out: bool) 
         return False
     else:
         invalidate_stats_cache()
+
+
+async def set_referral_code(pool: asyncpg.Pool, user_id: int, code: str) -> bool:
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                result = await conn.execute(
+                    "UPDATE users SET referral_code = $2 WHERE id = $1",
+                    user_id, code
+                )
+                return result.endswith("1")
+    except Exception as e:
+        logger.error(f"Error setting referral_code for {user_id}: {safe_error(e)}")
+        return False
+
+
+async def get_user_by_referral_code(pool: asyncpg.Pool, code: str) -> Optional[asyncpg.Record]:
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                return await conn.fetchrow(
+                    "SELECT id FROM users WHERE referral_code = $1", code
+                )
+    except Exception as e:
+        logger.error(f"Error fetching referral code {code}: {safe_error(e)}")
+        return None
+
+
+async def set_referred_by(pool: asyncpg.Pool, user_id: int, referrer_id: int) -> bool:
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                result = await conn.execute(
+                    "UPDATE users SET referred_by = $2 WHERE id = $1",
+                    user_id, referrer_id
+                )
+                return result.endswith("1")
+    except Exception as e:
+        logger.error(f"Error setting referred_by for {user_id}: {safe_error(e)}")
+        return False
+
+
+async def get_referral_count(pool: asyncpg.Pool, user_id: int) -> int:
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                return await conn.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE referred_by = $1", user_id
+                ) or 0
+    except Exception as e:
+        logger.error(f"Error counting referrals for {user_id}: {safe_error(e)}")
+        return 0
+
+
+async def get_invite_key(pool: asyncpg.Pool) -> str:
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                val = await conn.fetchval(
+                    "SELECT value FROM admin_config WHERE key = 'invite_key'"
+                )
+                return val or "aegis2026"
+    except Exception as e:
+        logger.error(f"Error fetching invite_key: {safe_error(e)}")
+        return "aegis2026"
+
+
+async def set_invite_key(pool: asyncpg.Pool, new_key: str) -> bool:
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO admin_config (key, value) VALUES ('invite_key', $1) "
+                    "ON CONFLICT (key) DO UPDATE SET value = $1",
+                    new_key
+                )
+                return True
+    except Exception as e:
+        logger.error(f"Error setting invite_key: {safe_error(e)}")
+        return False
 
 
 async def get_user_rank(pool: asyncpg.Pool, user_id: int) -> int:
