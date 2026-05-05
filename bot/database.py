@@ -1511,6 +1511,164 @@ async def get_all_sent_messages_batch(
         )
 
 
+async def get_media_delete_stats(pool: asyncpg.Pool, media_id: int) -> Optional[dict]:
+    """Get stats for a single media item to show admin before deletion."""
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                media = await conn.fetchrow("SELECT * FROM media WHERE id = $1", media_id)
+                if not media:
+                    return None
+                sent_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM sent_messages WHERE media_id = $1", media_id
+                ) or 0
+                unique_recipients = await conn.fetchval(
+                    "SELECT COUNT(DISTINCT recipient_id) FROM sent_messages WHERE media_id = $1", media_id
+                ) or 0
+                uploader = await conn.fetchrow(
+                    "SELECT anonymous_name FROM users WHERE id = $1", media['user_id']
+                )
+                is_queued = media['sent_at'] is None
+                return {
+                    'media': dict(media),
+                    'uploader_name': uploader['anonymous_name'] if uploader else 'unknown',
+                    'is_queued': is_queued,
+                    'sent_count': int(sent_count),
+                    'unique_recipients': int(unique_recipients),
+                }
+    except Exception as e:
+        logger.error(f"Error getting media delete stats: {safe_error(e)}")
+        return None
+
+
+async def delete_single_media_db(pool: asyncpg.Pool, media_id: int) -> bool:
+    """Delete a single media item and its sent_messages records from DB.
+    Returns True if deleted, False if not found."""
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    # Delete sent_messages referencing this media
+                    await conn.execute(
+                        "DELETE FROM sent_messages WHERE media_id = $1", media_id
+                    )
+                    # Delete the media itself
+                    result = await conn.execute(
+                        "DELETE FROM media WHERE id = $1", media_id
+                    )
+                    deleted = result != "DELETE 0"
+                    # Also solve any unsolved reports for this media
+                    if deleted:
+                        await conn.execute(
+                            "UPDATE reports SET solved = TRUE, solved_at = NOW() WHERE media_id = $1 AND solved = FALSE",
+                            media_id
+                        )
+                    return deleted
+    except Exception as e:
+        logger.error(f"Error deleting single media {media_id}: {safe_error(e)}")
+        return False
+
+
+async def get_user_media_stats(pool: asyncpg.Pool, user_id: int) -> dict:
+    """Get media stats for a specific user (for purge confirmation)."""
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                queued = await conn.fetchval(
+                    "SELECT COUNT(*) FROM media WHERE user_id = $1 AND sent_at IS NULL",
+                    user_id
+                ) or 0
+                sent_media = await conn.fetchval(
+                    "SELECT COUNT(*) FROM media WHERE user_id = $1 AND sent_at IS NOT NULL",
+                    user_id
+                ) or 0
+                sent_messages = await conn.fetchval(
+                    """SELECT COUNT(*) FROM sent_messages sm
+                       JOIN media m ON sm.media_id = m.id
+                       WHERE m.user_id = $1""",
+                    user_id
+                ) or 0
+                unique_recipients = await conn.fetchval(
+                    """SELECT COUNT(DISTINCT sm.recipient_id) FROM sent_messages sm
+                       JOIN media m ON sm.media_id = m.id
+                       WHERE m.user_id = $1""",
+                    user_id
+                ) or 0
+                return {
+                    'queued': int(queued),
+                    'sent_media': int(sent_media),
+                    'sent_messages': int(sent_messages),
+                    'unique_recipients': int(unique_recipients),
+                }
+    except Exception as e:
+        logger.error(f"Error getting user media stats: {safe_error(e)}")
+        return {'queued': 0, 'sent_media': 0, 'sent_messages': 0, 'unique_recipients': 0}
+
+
+async def purge_user_queued_media(pool: asyncpg.Pool, user_id: int) -> int:
+    """Delete all unsent (queued) media for a user. Returns count deleted."""
+    try:
+        async with asyncio.timeout(15):
+            async with pool.acquire() as conn:
+                result = await conn.execute(
+                    "DELETE FROM media WHERE user_id = $1 AND sent_at IS NULL", user_id
+                )
+                return int(result.split()[-1])
+    except Exception as e:
+        logger.error(f"Error purging queued media for user {user_id}: {safe_error(e)}")
+        return 0
+
+
+async def get_user_sent_messages_for_purge(pool: asyncpg.Pool, user_id: int, limit: int = 200, offset: int = 0) -> List[asyncpg.Record]:
+    """Get sent_messages for a specific user's media (for chat deletion)."""
+    try:
+        async with asyncio.timeout(15):
+            async with pool.acquire() as conn:
+                return await conn.fetch(
+                    """SELECT sm.id, sm.recipient_id, sm.message_id, sm.media_id
+                       FROM sent_messages sm
+                       JOIN media m ON sm.media_id = m.id
+                       WHERE m.user_id = $1
+                       ORDER BY sm.id ASC
+                       LIMIT $2 OFFSET $3""",
+                    user_id, limit, offset
+                )
+    except Exception as e:
+        logger.error(f"Error fetching user sent messages for purge: {safe_error(e)}")
+        return []
+
+
+async def delete_user_sent_messages_batch(pool: asyncpg.Pool, user_id: int) -> int:
+    """Delete all sent_messages for a user's media from DB. Returns count deleted."""
+    try:
+        async with asyncio.timeout(15):
+            async with pool.acquire() as conn:
+                result = await conn.execute(
+                    """DELETE FROM sent_messages WHERE media_id IN (
+                           SELECT id FROM media WHERE user_id = $1
+                       )""",
+                    user_id
+                )
+                return int(result.split()[-1])
+    except Exception as e:
+        logger.error(f"Error deleting user sent messages: {safe_error(e)}")
+        return 0
+
+
+async def delete_user_sent_media(pool: asyncpg.Pool, user_id: int) -> int:
+    """Delete all sent media rows for a user from DB. Returns count deleted."""
+    try:
+        async with asyncio.timeout(15):
+            async with pool.acquire() as conn:
+                result = await conn.execute(
+                    "DELETE FROM media WHERE user_id = $1 AND sent_at IS NOT NULL", user_id
+                )
+                return int(result.split()[-1])
+    except Exception as e:
+        logger.error(f"Error deleting user sent media: {safe_error(e)}")
+        return 0
+
+
 async def full_reset(pool: asyncpg.Pool) -> dict:
     """Wipe ALL bot data for a fresh start. Keeps admin_config and table structure.
     Use when switching to a new bot token to clear old bot's stats."""

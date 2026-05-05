@@ -17,11 +17,12 @@ from database import (
     get_current_session, end_session, get_session_stats, is_session_paused,
     create_report, set_report_admin_message, mark_user_blocked,
     get_wipe_stats, reset_all_blocked_status, DatabaseError,
-    get_invite_key, set_invite_key
+    get_invite_key, set_invite_key,
+    get_media_delete_stats, get_user_media_stats
 )
 from utils.helpers import format_datetime, format_timedelta_until, get_all_badges, safe_error
 from utils.session_announce import broadcast_session_results
-from tasks.cleanup import delete_session_messages, emergency_wipe_all
+from tasks.cleanup import delete_session_messages, emergency_wipe_all, delete_media_sent_messages, purge_user_sent_messages
 from config import ADMIN_IDS, is_admin
 
 logger = logging.getLogger(__name__)
@@ -492,6 +493,12 @@ async def admin_view_report(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bo
                 callback_data=f"admin_ban_{report['uploader_id']}"
             ),
         ],
+        [
+            InlineKeyboardButton(
+                text="🗑 Delete Media",
+                callback_data=f"admin_del_media_{report_id}"
+            ),
+        ],
         [InlineKeyboardButton(text="◀️ Back", callback_data="admin_reports_0")],
     ])
 
@@ -657,6 +664,7 @@ async def show_user_detail(target, user, pool):
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [action_btn],
+        [InlineKeyboardButton(text="🗑 Purge All Media", callback_data=f"admin_purge_user_media_{user['id']}")],
         [InlineKeyboardButton(text="◀️ Back", callback_data="admin_users")],
     ])
     await target.answer(text, parse_mode="HTML", reply_markup=kb)
@@ -717,6 +725,205 @@ async def cb_unban_user(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
                 [InlineKeyboardButton(text="◀️ Back", callback_data="admin_users")],
             ])
         )
+    except Exception:
+        pass
+
+
+# ── Single Media Delete ──────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("admin_del_media_") & ~F.data.contains("_do_"))
+async def admin_delete_media_confirm(callback: CallbackQuery, pool: asyncpg.Pool):
+    """Show confirmation dialog before deleting a single reported media."""
+    if not is_admin(callback.from_user.id):
+        return
+
+    report_id = int(callback.data.split("_")[-1])
+
+    async with pool.acquire() as conn:
+        report = await conn.fetchrow("SELECT * FROM reports WHERE id = $1", report_id)
+
+    if not report or not report['media_id']:
+        await callback.answer("⚠️ Report has no linked media.")
+        return
+
+    media_id = report['media_id']
+    stats = await get_media_delete_stats(pool, media_id)
+
+    if not stats:
+        await callback.answer("⚠️ Media no longer exists.")
+        return
+
+    if stats['is_queued']:
+        status_line = "📤 Status: <b>In queue (not yet sent)</b>"
+        impact_line = "This will remove it from the broadcast queue."
+    else:
+        status_line = f"📨 Status: Sent to <b>{stats['unique_recipients']}</b> users"
+        impact_line = (
+            f"This will:\n"
+            f"  • Delete it from <b>{stats['unique_recipients']}</b> recipients' chats\n"
+            f"  • Remove it from the database\n"
+            f"  • Mark this report as solved"
+        )
+
+    text = (
+        f"⚠️ <b>Delete Media #{media_id}?</b>\n\n"
+        f"Type: {stats['media']['media_type']} | Uploader: <b>{stats['uploader_name']}</b>\n"
+        f"{status_line}\n\n"
+        f"{impact_line}\n\n"
+        f"Uploader's account is <b>NOT</b> affected.\n\n"
+        f"<b>This cannot be undone.</b>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Yes, Delete", callback_data=f"admin_delete_media_do_{media_id}"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data=f"admin_view_report_{report_id}"),
+        ],
+    ])
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.bot.send_message(callback.from_user.id, text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_delete_media_do_"))
+async def admin_delete_media_do(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
+    """Execute single media deletion."""
+    if not is_admin(callback.from_user.id):
+        return
+
+    media_id = int(callback.data.replace("admin_delete_media_do_", ""))
+
+    await callback.answer("🗑 Deleting media...")
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    progress_msg = await callback.bot.send_message(
+        callback.from_user.id,
+        "🗑 <b>Deleting media...</b>\n\n⏳ Removing from chats and database...",
+        parse_mode="HTML"
+    )
+
+    result = await delete_media_sent_messages(bot, pool, media_id)
+
+    if result.get('error'):
+        try:
+            await progress_msg.edit_text(
+                f"❌ <b>Media not found</b> (ID: {media_id}). It may have already been deleted.",
+                parse_mode="HTML",
+                reply_markup=admin_main_keyboard()
+            )
+        except Exception:
+            pass
+        return
+
+    if result.get('queued_removed'):
+        done_text = (
+            f"✅ <b>Media Deleted</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"🗑 Removed from broadcast queue\n"
+            f"📋 Report marked as solved"
+        )
+    else:
+        done_text = (
+            f"✅ <b>Media Deleted</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"🗑 Chat messages deleted: <b>{result['deleted']}</b>\n"
+            f"⏭ Skipped (too old): <b>{result['skipped']}</b>\n"
+            f"📋 Report marked as solved"
+        )
+
+    try:
+        await progress_msg.edit_text(done_text, parse_mode="HTML", reply_markup=admin_main_keyboard())
+    except Exception:
+        pass
+
+
+# ── User Media Purge ─────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("admin_purge_user_media_") & ~F.data.contains("_do_"))
+async def admin_purge_user_media_confirm(callback: CallbackQuery, pool: asyncpg.Pool):
+    """Show confirmation dialog before purging all of a user's media."""
+    if not is_admin(callback.from_user.id):
+        return
+
+    user_id = int(callback.data.replace("admin_purge_user_media_", ""))
+
+    user = await get_user(pool, user_id)
+    if not user:
+        await callback.answer("⚠️ User not found.")
+        return
+
+    stats = await get_user_media_stats(pool, user_id)
+
+    if stats['queued'] == 0 and stats['sent_media'] == 0:
+        await callback.answer("✅ This user has no media to purge.")
+        return
+
+    text = (
+        f"⚠️ <b>Purge All Media for {user['anonymous_name']}?</b>\n\n"
+        f"📤 Queued (unsent): <b>{stats['queued']}</b> items\n"
+        f"📨 Sent (in chats): <b>{stats['sent_media']}</b> items → <b>{stats['sent_messages']}</b> messages to <b>{stats['unique_recipients']}</b> users\n\n"
+        f"This will:\n"
+        f"  • Remove <b>{stats['queued']}</b> items from broadcast queue\n"
+        f"  • Delete <b>{stats['sent_messages']}</b> messages from recipients' chats\n"
+        f"  • Remove all media records from database\n\n"
+        f"User's account is <b>NOT</b> affected (status unchanged).\n\n"
+        f"<b>This cannot be undone.</b>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Yes, Purge All", callback_data=f"admin_purge_user_media_do_{user_id}"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data="admin_users"),
+        ],
+    ])
+
+    await _send_fresh(callback, text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_purge_user_media_do_"))
+async def admin_purge_user_media_do(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
+    """Execute user media purge."""
+    if not is_admin(callback.from_user.id):
+        return
+
+    user_id = int(callback.data.replace("admin_purge_user_media_do_", ""))
+
+    await callback.answer("🗑 Purging media...")
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    progress_msg = await callback.bot.send_message(
+        callback.from_user.id,
+        "🗑 <b>Purging user media...</b>\n\n⏳ Deleting from chats and database...",
+        parse_mode="HTML"
+    )
+
+    result = await purge_user_sent_messages(bot, pool, user_id)
+
+    done_text = (
+        f"✅ <b>Media Purged</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"🗑 Chat messages deleted: <b>{result['chat_deleted']}</b>\n"
+        f"⏭ Skipped (too old): <b>{result['chat_skipped']}</b>\n"
+        f"📤 Queue items removed: <b>{result['queued_deleted']}</b>\n"
+        f"💾 DB media deleted: <b>{result['db_media_deleted']}</b>\n"
+        f"💾 DB sent_messages deleted: <b>{result['db_sent_deleted']}</b>"
+    )
+
+    try:
+        await progress_msg.edit_text(done_text, parse_mode="HTML", reply_markup=admin_main_keyboard())
     except Exception:
         pass
 
