@@ -469,24 +469,45 @@ async def _count_all_messages(pool: asyncpg.Pool) -> int:
 
 async def delete_media_sent_messages(bot: Bot, pool: asyncpg.Pool, media_id: int) -> dict:
     """Delete a single media's sent messages from recipient chats, then remove from DB.
+    Also deletes the original uploader's message if tracked.
     Returns dict with deleted/skipped counts."""
     stats = await get_media_delete_stats(pool, media_id)
     if not stats:
+        logger.warning(f"delete_media_sent_messages: media {media_id} not found in DB")
         return {'deleted': 0, 'skipped': 0, 'total': 0, 'error': 'Media not found'}
 
-    # If queued (never sent), just delete from DB
-    if stats['is_queued']:
-        ok = await delete_single_media_db(pool, media_id)
-        return {'deleted': 0, 'skipped': 0, 'total': 1 if ok else 0, 'queued_removed': ok}
-
-    # If sent, delete messages from recipient chats first
-    semaphore = asyncio.Semaphore(CLEANUP_CONCURRENCY)
+    media = stats['media']
     chat_deleted = 0
     chat_skipped = 0
+    original_deleted = False
 
-    # Fetch sent messages for this media in batches
+    # 1. Delete the original uploader's message from their chat
+    if media.get('original_chat_id') and media.get('original_message_id'):
+        try:
+            await bot.delete_message(media['original_chat_id'], media['original_message_id'])
+            original_deleted = True
+            logger.info(f"Deleted original upload message for media {media_id} from chat {media['original_chat_id']}")
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            try:
+                await bot.delete_message(media['original_chat_id'], media['original_message_id'])
+                original_deleted = True
+            except Exception:
+                logger.warning(f"Failed to delete original message for media {media_id} after retry")
+        except Exception as e:
+            logger.warning(f"Could not delete original upload message for media {media_id}: {safe_error(e)}")
+
+    # 2. If queued (never sent), just delete from DB
+    if stats['is_queued']:
+        ok = await delete_single_media_db(pool, media_id)
+        logger.info(f"Deleted queued media {media_id}: success={ok}")
+        return {'deleted': 1 if original_deleted else 0, 'skipped': 0, 'total': 1 if ok else 0,
+                'queued_removed': ok, 'original_deleted': original_deleted}
+
+    # 3. If sent, delete broadcast messages from recipient chats
+    semaphore = asyncio.Semaphore(CLEANUP_CONCURRENCY)
     offset = 0
-    all_msg_ids = []
+
     while True:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -496,7 +517,6 @@ async def delete_media_sent_messages(bot: Bot, pool: asyncpg.Pool, media_id: int
             )
         if not rows:
             break
-        all_msg_ids.extend([row['id'] for row in rows])
 
         tasks = [
             _delete_one_message(semaphore, bot, row['recipient_id'], row['message_id'])
@@ -507,27 +527,50 @@ async def delete_media_sent_messages(bot: Bot, pool: asyncpg.Pool, media_id: int
         chat_skipped += sum(1 for r in results if r is not True)
         offset += 200
 
-    # Now delete from DB (sent_messages + media row + solve reports)
+    logger.info(f"Deleted media {media_id} from chats: {chat_deleted} deleted, {chat_skipped} skipped, original_deleted={original_deleted}")
+
+    # 4. Now delete from DB (sent_messages + media row + solve reports)
     await delete_single_media_db(pool, media_id)
 
     return {
         'deleted': chat_deleted,
         'skipped': chat_skipped,
         'total': chat_deleted + chat_skipped,
+        'original_deleted': original_deleted,
     }
 
 
 async def purge_user_sent_messages(bot: Bot, pool: asyncpg.Pool, user_id: int) -> dict:
     """Delete all of a user's sent media messages from recipient chats, then remove from DB.
+    Also deletes original uploader messages if tracked.
     Returns dict with deleted/skipped/queued counts."""
     semaphore = asyncio.Semaphore(CLEANUP_CONCURRENCY)
     chat_deleted = 0
     chat_skipped = 0
     total_processed = 0
+    original_deleted = 0
 
-    # Delete messages from chats in batches
+    # 1. Delete original uploader messages from their chat
+    try:
+        async with pool.acquire() as conn:
+            originals = await conn.fetch(
+                "SELECT id, original_chat_id, original_message_id FROM media "
+                "WHERE user_id = $1 AND original_chat_id IS NOT NULL AND original_message_id IS NOT NULL",
+                user_id
+            )
+        for row in originals:
+            try:
+                await bot.delete_message(row['original_chat_id'], row['original_message_id'])
+                original_deleted += 1
+            except Exception:
+                pass
+        if originals:
+            logger.info(f"Purge user {user_id}: deleted {original_deleted}/{len(originals)} original upload messages")
+    except Exception as e:
+        logger.warning(f"Purge user {user_id}: error fetching original messages: {safe_error(e)}")
+
+    # 2. Delete broadcast messages from recipient chats in batches
     offset = 0
-    processed_media_ids = set()
     while True:
         rows = await get_user_sent_messages_for_purge(pool, user_id, limit=CLEANUP_BATCH_SIZE, offset=offset)
         if not rows:
@@ -541,19 +584,21 @@ async def purge_user_sent_messages(bot: Bot, pool: asyncpg.Pool, user_id: int) -
         chat_deleted += sum(1 for r in results if r is True)
         chat_skipped += sum(1 for r in results if r is not True)
         total_processed += len(rows)
-        processed_media_ids.update(row['media_id'] for row in rows if row.get('media_id'))
 
         offset += CLEANUP_BATCH_SIZE
         await asyncio.sleep(0.2)
 
-    # Delete sent_messages from DB
+    # 3. Delete sent_messages from DB
     db_sent_deleted = await delete_user_sent_messages_batch(pool, user_id)
 
-    # Delete sent media rows from DB
+    # 4. Delete sent media rows from DB
     db_media_deleted = await delete_user_sent_media(pool, user_id)
 
-    # Delete queued (unsent) media from DB
+    # 5. Delete queued (unsent) media from DB
     queued_deleted = await purge_user_queued_media(pool, user_id)
+
+    logger.info(f"Purge user {user_id} complete: chat_deleted={chat_deleted}, chat_skipped={chat_skipped}, "
+                f"original_deleted={original_deleted}, queued={queued_deleted}, db_media={db_media_deleted}")
 
     return {
         'chat_deleted': chat_deleted,
@@ -561,5 +606,6 @@ async def purge_user_sent_messages(bot: Bot, pool: asyncpg.Pool, user_id: int) -
         'db_sent_deleted': db_sent_deleted,
         'db_media_deleted': db_media_deleted,
         'queued_deleted': queued_deleted,
+        'original_deleted': original_deleted,
         'total': total_processed + queued_deleted,
     }

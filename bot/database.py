@@ -164,6 +164,21 @@ async def init_db(pool: asyncpg.Pool):
             "SELECT data_type FROM information_schema.columns WHERE table_name='users' AND column_name='referred_by' AND data_type='integer'",
             "ALTER TABLE users ALTER COLUMN referred_by TYPE BIGINT",
             "users_referred_by_bigint"
+        ),
+        (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='media' AND column_name='original_chat_id'",
+            "ALTER TABLE media ADD COLUMN original_chat_id BIGINT",
+            "media_original_chat_id"
+        ),
+        (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='media' AND column_name='original_message_id'",
+            "ALTER TABLE media ADD COLUMN original_message_id BIGINT",
+            "media_original_message_id"
+        ),
+        (
+            "SELECT 1 FROM pg_indexes WHERE indexname='idx_sent_messages_media_id'",
+            "CREATE INDEX idx_sent_messages_media_id ON sent_messages(media_id) WHERE media_id IS NOT NULL",
+            "idx_sent_messages_media_id"
         )
     ]
 
@@ -508,7 +523,9 @@ async def add_media(
     file_unique_id: str,
     media_type: str,
     delay_seconds: int,
-    media_group_id: Optional[str] = None
+    media_group_id: Optional[str] = None,
+    original_chat_id: Optional[int] = None,
+    original_message_id: Optional[int] = None
 ) -> Optional[asyncpg.Record]:
     """Adds media with staggered scheduling to handle high volume (100-1000+) gracefully.
     If multiple items are uploaded quickly, they are spread out in the queue."""
@@ -536,9 +553,11 @@ async def add_media(
 
                 return await conn.fetchrow(
                     """INSERT INTO media 
-                       (user_id, session_id, file_id, file_unique_id, media_type, scheduled_at, media_group_id) 
-                       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *""",
-                    user_id, session_id, file_id, file_unique_id, media_type, scheduled_at, media_group_id
+                       (user_id, session_id, file_id, file_unique_id, media_type, scheduled_at, media_group_id,
+                        original_chat_id, original_message_id) 
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *""",
+                    user_id, session_id, file_id, file_unique_id, media_type, scheduled_at, media_group_id,
+                    original_chat_id, original_message_id
                 )
     except Exception as e:
         logger.error(f"Error adding media for {user_id}: {safe_error(e)}")

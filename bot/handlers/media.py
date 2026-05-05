@@ -206,7 +206,9 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                 await add_media(
                     pool, user_id, session_id, 
                     file_id, file_unique_id, media_type, 
-                    delay, media_group_id
+                    delay, media_group_id,
+                    original_chat_id=chat_id,
+                    original_message_id=message.message_id
                 )
                 await _safe_answer(message,
                     "✅ <b>You are now active!</b>\n\n"
@@ -238,7 +240,9 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                 await add_media(
                     pool, user_id, session_id, 
                     file_id, file_unique_id, media_type, 
-                    delay, media_group_id
+                    delay, media_group_id,
+                    original_chat_id=chat_id,
+                    original_message_id=message.message_id
                 )
                 await _safe_answer(message,
                     "✅ <b>You have been reactivated!</b>\n\n"
@@ -266,7 +270,9 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         await add_media(
             pool, user_id, session_id,
             file_id, file_unique_id, media_type, 
-            delay, media_group_id
+            delay, media_group_id,
+            original_chat_id=chat_id,
+            original_message_id=message.message_id
         )
         if level_up:
             await _safe_answer(message,

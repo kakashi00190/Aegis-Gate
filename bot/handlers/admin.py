@@ -42,6 +42,10 @@ class AdminAnnounceState(StatesGroup):
     confirming = State()
 
 
+class AdminMediaState(StatesGroup):
+    entering_media_id = State()
+
+
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -53,10 +57,11 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="👥 Users", callback_data="admin_users"),
         ],
         [
+            InlineKeyboardButton(text="🧹 Media Control", callback_data="admin_media_control"),
             InlineKeyboardButton(text="📢 Announce", callback_data="admin_announce"),
-            InlineKeyboardButton(text="🏆 Session", callback_data="admin_session"),
         ],
         [
+            InlineKeyboardButton(text="🏆 Session", callback_data="admin_session"),
             InlineKeyboardButton(text="🚨 Emergency Wipe", callback_data="admin_emergency_wipe"),
         ],
         [
@@ -828,14 +833,15 @@ async def admin_delete_media_do(callback: CallbackQuery, pool: asyncpg.Pool, bot
             f"✅ <b>Media Deleted</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n\n"
             f"🗑 Removed from broadcast queue\n"
-            f"📋 Report marked as solved"
+            f"� Uploader's original message: {'✅ Deleted' if result.get('original_deleted') else '⚠️ Not tracked (old media)'}\n"
+            f"�📋 Report marked as solved"
         )
     else:
         done_text = (
             f"✅ <b>Media Deleted</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"🗑 Chat messages deleted: <b>{result['deleted']}</b>\n"
-            f"⏭ Skipped (too old): <b>{result['skipped']}</b>\n"
+            f"🗑 Recipient chats: {result['deleted']} deleted, {result['skipped']} skipped (too old)\n"
+            f"📤 Uploader's original message: {'✅ Deleted' if result.get('original_deleted') else '⚠️ Not tracked (old media)'}\n"
             f"📋 Report marked as solved"
         )
 
@@ -915,8 +921,8 @@ async def admin_purge_user_media_do(callback: CallbackQuery, pool: asyncpg.Pool,
     done_text = (
         f"✅ <b>Media Purged</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"🗑 Chat messages deleted: <b>{result['chat_deleted']}</b>\n"
-        f"⏭ Skipped (too old): <b>{result['chat_skipped']}</b>\n"
+        f"🗑 Recipient chats: {result['chat_deleted']} deleted, {result['chat_skipped']} skipped\n"
+        f"📤 Uploader's original messages: {result.get('original_deleted', 0)} deleted\n"
         f"📤 Queue items removed: <b>{result['queued_deleted']}</b>\n"
         f"💾 DB media deleted: <b>{result['db_media_deleted']}</b>\n"
         f"💾 DB sent_messages deleted: <b>{result['db_sent_deleted']}</b>"
@@ -926,6 +932,109 @@ async def admin_purge_user_media_do(callback: CallbackQuery, pool: asyncpg.Pool,
         await progress_msg.edit_text(done_text, parse_mode="HTML", reply_markup=admin_main_keyboard())
     except Exception:
         pass
+
+
+@router.callback_query(F.data == "admin_media_control")
+async def admin_media_control(callback: CallbackQuery, pool: asyncpg.Pool):
+    if not is_admin(callback.from_user.id):
+        return
+
+    async with pool.acquire() as conn:
+        in_queue = await conn.fetchval(
+            "SELECT COUNT(*) FROM media WHERE sent_at IS NULL"
+        ) or 0
+        total_media = await conn.fetchval("SELECT COUNT(*) FROM media") or 0
+
+    text = (
+        "🧹 <b>Media Control</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 Total media: <b>{total_media}</b>\n"
+        f"📤 In broadcast queue: <b>{in_queue}</b>\n\n"
+        "🗑 <b>Delete by Media ID</b> — remove a specific media item\n"
+        "   (from reports or enter ID manually)\n\n"
+        "🗑 <b>Purge User Media</b> — remove all media from a user\n"
+        "   (find user via 👥 Users → search → Purge All Media)"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Delete by Media ID", callback_data="admin_media_delete_by_id")],
+        [InlineKeyboardButton(text="◀️ Back", callback_data="admin_main")],
+    ])
+
+    await _send_fresh(callback, text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_media_delete_by_id")
+async def admin_media_delete_by_id(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    await state.set_state(AdminMediaState.entering_media_id)
+    await _send_fresh(
+        callback,
+        "🗑 <b>Delete Media by ID</b>\n\n"
+        "Enter the media ID to delete:\n\n"
+        "Send /cancel to abort."
+    )
+    await callback.answer()
+
+
+@router.message(AdminMediaState.entering_media_id)
+async def process_media_id_delete(message: Message, state: FSMContext, pool: asyncpg.Pool):
+    if not is_admin(message.from_user.id):
+        return
+
+    if message.text and message.text.strip() == '/cancel':
+        await state.clear()
+        await message.answer("Cancelled.", reply_markup=admin_main_keyboard())
+        return
+
+    try:
+        media_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Invalid. Enter a numeric media ID.")
+        return
+
+    await state.clear()
+
+    stats = await get_media_delete_stats(pool, media_id)
+    if not stats:
+        await message.answer(
+            f"❌ Media ID <code>{media_id}</code> not found.",
+            parse_mode="HTML",
+            reply_markup=admin_main_keyboard()
+        )
+        return
+
+    if stats['is_queued']:
+        status_line = "📤 Status: <b>In queue (not yet sent)</b>"
+        impact_line = "This will remove it from the broadcast queue."
+    else:
+        status_line = f"📨 Status: Sent to <b>{stats['unique_recipients']}</b> users"
+        impact_line = (
+            f"This will:\n"
+            f"  • Delete it from <b>{stats['unique_recipients']}</b> recipients' chats\n"
+            f"  • Delete the uploader's original message\n"
+            f"  • Remove it from the database"
+        )
+
+    text = (
+        f"⚠️ <b>Delete Media #{media_id}?</b>\n\n"
+        f"Type: {stats['media']['media_type']} | Uploader: <b>{stats['uploader_name']}</b>\n"
+        f"{status_line}\n\n"
+        f"{impact_line}\n\n"
+        f"Uploader's account is <b>NOT</b> affected.\n\n"
+        f"<b>This cannot be undone.</b>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Yes, Delete", callback_data=f"admin_delete_media_do_{media_id}"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data="admin_media_control"),
+        ],
+    ])
+
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.callback_query(F.data == "admin_announce")
