@@ -20,7 +20,7 @@ from tasks.broadcast import process_broadcast_queue, sent_messages_logger_task
 from tasks.inactivity import check_inactivity
 from utils.helpers import safe_error
 from tasks.session import check_session_end
-from tasks.cleanup import cleanup_stale_verifications_task
+from tasks.cleanup import cleanup_stale_verifications_task, cleanup_48hr_media_task
 
 logging.basicConfig(
     level=logging.INFO,
@@ -217,6 +217,7 @@ async def main():
     loop.create_task(check_inactivity(bot, pool))
     loop.create_task(check_session_end(bot, pool))
     loop.create_task(cleanup_stale_verifications_task(pool))
+    loop.create_task(cleanup_48hr_media_task(pool))
 
     logger.info(f"Bot running. Admin IDs configured: {len(config.ADMIN_IDS)}")
 

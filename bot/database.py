@@ -552,8 +552,7 @@ async def update_user_on_upload(
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 # Use a single atomic UPDATE with RETURNING to get both old and new values
-                # Level formula: level = floor(sqrt(exp / 100))
-                # Note: This formula matches `required_exp(level) = 100 * (level ** 2)`
+                # Level formula: 200 * level * (1.4 ^ level) — matches required_exp() in levels.py
                 updated = await conn.fetchrow(
                     """
                     WITH old_data AS (
@@ -561,7 +560,10 @@ async def update_user_on_upload(
                     )
                     UPDATE users SET
                         exp = exp + $2,
-                        level = floor(sqrt((exp + $2) / 100.0)),
+                        level = GREATEST(1, (
+                            SELECT MAX(l) FROM generate_series(1, 200) AS l
+                            WHERE 200.0 * l * power(1.4, l) <= (users.exp + $2)
+                        )),
                         total_media_lifetime = total_media_lifetime + 1,
                         session_upload_count = session_upload_count + 1,
                         last_activity_at = NOW(),

@@ -437,6 +437,28 @@ async def cleanup_stale_verifications_task(pool: asyncpg.Pool):
             logger.error(f"Error in cleanup_stale_verifications_task: {safe_error(e)}")
 
 
+async def cleanup_48hr_media_task(pool: asyncpg.Pool):
+    """Background task to purge media and sent_messages older than 48 hours.
+    Telegram bots cannot delete messages older than 48h, so keeping these
+    records serves no purpose and wastes database storage."""
+    while True:
+        await asyncio.sleep(3600)  # Run every 1 hour
+        try:
+            async with pool.acquire() as conn:
+                # Delete sent_messages older than 48h
+                sm_deleted = await conn.execute(
+                    "DELETE FROM sent_messages WHERE sent_at < NOW() - INTERVAL '48 hours'"
+                )
+                # Delete media records older than 48h that have been sent
+                media_deleted = await conn.execute(
+                    "DELETE FROM media WHERE sent_at IS NOT NULL AND sent_at < NOW() - INTERVAL '48 hours'"
+                )
+                if sm_deleted != "DELETE 0" or media_deleted != "DELETE 0":
+                    logger.info(f"48hr cleanup: sent_messages {sm_deleted}, media {media_deleted}")
+        except Exception as e:
+            logger.error(f"Error in cleanup_48hr_media_task: {safe_error(e)}")
+
+
 async def _count_all_messages(pool: asyncpg.Pool) -> int:
     async with pool.acquire() as conn:
         return await conn.fetchval("SELECT COUNT(*) FROM sent_messages") or 0

@@ -131,9 +131,10 @@ async def cmd_leaderboard(message: Message, pool: asyncpg.Pool):
         medal = medal_for_rank(rank)
         badges = get_badge_display(entry['badge_emoji'], max_shown=3)
         badge_str = f" [{badges}]" if badges != "—" else ""
+        lvl = entry.get('level', 1)
         lines.append(
             f"{medal} <b>{entry['anonymous_name']}</b>{badge_str} — "
-            f"{entry['session_upload_count']} uploads"
+            f"{entry['session_upload_count']} uploads · Lv.{lvl}"
         )
 
     if not leaders:
@@ -143,8 +144,12 @@ async def cmd_leaderboard(message: Message, pool: asyncpg.Pool):
         user_rank = await get_user_rank(pool, message.from_user.id)
         lines.append(
             f"\n📍 Your rank: <b>#{user_rank}</b> "
-            f"({user['session_upload_count']} uploads)"
+            f"({user['session_upload_count']} uploads · Lv.{user['level']})"
         )
+
+    lines.append(
+        "\n💡 Use <b>/inspect name</b> to view any user's full profile."
+    )
 
     await message.answer("\n".join(lines), parse_mode="HTML")
 
@@ -267,7 +272,7 @@ TERMS_TEXT = (
     "• Content you upload <b>will be shared with other active users</b> automatically\n"
     "• You may <b>receive content from other users</b> automatically\n"
     "• Some content may be sensitive or inappropriate\n"
-    "• You are responsible for anything you upload — <b>no illegal or harmful material</b>\n\n"
+    "• You are responsible for anything you upload — <b>no harmful material</b>\n\n"
     "Controls available to you:\n"
     "• /stop — Stop receiving content at any time\n"
     "• /start — Resume participation\n"
@@ -328,10 +333,33 @@ async def cmd_referral(message: Message, pool: asyncpg.Pool):
     link = f"https://t.me/{bot_username}?start={invite_key}_{ref_code}"
     count = await get_referral_count(pool, message.from_user.id)
 
+    # Badge progress
+    from utils.levels import REFERRAL_BADGES, referral_badge_for_count, referral_exp_bonus
+    badge_info = referral_badge_for_count(count)
+
+    # Find next milestone
+    next_milestone = None
+    for threshold, emoji, title in REFERRAL_BADGES:
+        if count < threshold:
+            next_milestone = (threshold, emoji, title)
+            break
+
+    badge_text = ""
+    if badge_info:
+        emoji, title = badge_info
+        badge_text = f"\n🏅 Badge: {emoji} <b>{title}</b>"
+    if next_milestone:
+        th, em, ti = next_milestone
+        badge_text += f"\n⏳ Next badge: {em} <b>{ti}</b> ({th - count} more referrals)"
+
+    bonus = referral_exp_bonus(user['level'])
+
     await message.answer(
         "🔗 <b>Your Invite Link</b>\n\n"
         f"<code>{link}</code>\n\n"
-        f"📊 <b>{count}</b> user{'s' if count != 1 else ''} joined via your link\n\n"
+        f"📊 <b>{count}</b> user{'s' if count != 1 else ''} joined via your link"
+        f"{badge_text}\n"
+        f"💰 +{bonus} EXP per referral (scales with your level)\n\n"
         "Share it with friends to grow the community! 🚀",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[

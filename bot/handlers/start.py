@@ -18,7 +18,8 @@ from database import (
     get_user_by_referral_code, set_referred_by, get_referral_count
 )
 from utils.names import generate_anonymous_name
-from utils.helpers import format_timedelta_until
+from utils.helpers import format_timedelta_until, safe_error
+from utils.levels import referral_badge_for_count, referral_exp_bonus, REFERRAL_BADGES
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -43,7 +44,7 @@ TERMS_TEXT = (
     "• Content you upload <b>will be shared with other active users</b> automatically\n"
     "• You may <b>receive content from other users</b> automatically\n"
     "• Some content may be sensitive or inappropriate\n"
-    "• You are responsible for anything you upload — <b>no illegal or harmful material</b>\n\n"
+    "• You are responsible for anything you upload — <b>no harmful material</b>\n\n"
     "Controls available to you:\n"
     "• /stop — Stop receiving content at any time\n"
     "• /start — Resume participation\n"
@@ -361,9 +362,16 @@ async def stay_opted_out(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(F.text.startswith('/'), OnboardingState.disclaimer, OnboardingState.terms)
-async def onboarding_command_override(message: Message, state: FSMContext):
+async def onboarding_command_override(message: Message, state: FSMContext, pool: asyncpg.Pool):
     """Allow commands like /admin to work even during onboarding states."""
     await state.clear()
+    # Re-process the command now that state is cleared
+    cmd = message.text.split()[0].lower()
+    if cmd == "/start":
+        await cmd_start(message, state, pool)
+    elif cmd == "/admin":
+        from handlers.admin import cmd_admin
+        await cmd_admin(message, state)
 
 
 @router.message(VerificationState.waiting_answer, ~F.text.startswith('/'))
@@ -396,6 +404,9 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
         await message.answer(f"❌ Wrong. Try this one:\n\n<code>{question}</code>")
         return
 
+    # Read referral_code BEFORE clearing state
+    data = await state.get_data()
+    referral_code_from_link = data.get('referral_code')
     await state.clear()
 
     # Optimized verification context fetch
@@ -439,13 +450,70 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
         ref_code = _generate_referral_code()
     await set_referral_code(pool, message.from_user.id, ref_code)
 
-    # Handle referral tracking from FSM data
-    data = await state.get_data()
-    referral_code_from_link = data.get('referral_code')
+    # Handle referral tracking + reward referrer
     if referral_code_from_link:
         referrer = await get_user_by_referral_code(pool, referral_code_from_link)
         if referrer and referrer['id'] != message.from_user.id:
             await set_referred_by(pool, message.from_user.id, referrer['id'])
+            # Award EXP bonus to referrer
+            bonus = referral_exp_bonus(referrer['level'])
+            try:
+                async with pool.acquire() as conn:
+                    new_level = await conn.fetchval(
+                        "UPDATE users SET exp = exp + $2 WHERE id = $1 RETURNING level",
+                        referrer['id'], bonus
+                    )
+                    # Check for referral badge upgrade
+                    ref_count = await get_referral_count(pool, referrer['id'])
+                    badge_info = referral_badge_for_count(ref_count)
+                    if badge_info:
+                        emoji, title = badge_info
+                        existing_badges = referrer.get('badge_emoji') or ''
+                        if emoji not in existing_badges:
+                            new_badges = f"{existing_badges},{emoji}" if existing_badges else emoji
+                            await conn.execute(
+                                "UPDATE users SET badge_emoji = $1 WHERE id = $2",
+                                new_badges, referrer['id']
+                            )
+                            # Notify referrer of new badge
+                            try:
+                                await message.bot.send_message(
+                                    referrer['id'],
+                                    f"🏅 <b>New Referral Badge Unlocked!</b>\n\n"
+                                    f"{emoji} <b>{title}</b>\n"
+                                    f"You've referred <b>{ref_count}</b> users!\n\n"
+                                    f"+{bonus} EXP awarded for this referral.",
+                                    parse_mode="HTML"
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            # Already has badge, just notify EXP
+                            try:
+                                await message.bot.send_message(
+                                    referrer['id'],
+                                    f"🎁 <b>Referral Bonus!</b>\n\n"
+                                    f"Someone joined via your link!\n"
+                                    f"+{bonus} EXP",
+                                    parse_mode="HTML"
+                                )
+                            except Exception:
+                                pass
+                    else:
+                        # No badge yet, just notify EXP
+                        try:
+                            await message.bot.send_message(
+                                referrer['id'],
+                                f"🎁 <b>Referral Bonus!</b>\n\n"
+                                f"Someone joined via your link!\n"
+                                f"+{bonus} EXP\n\n"
+                                f"Refer {REFERRAL_BADGES[0][0]} people to unlock your first badge!",
+                                parse_mode="HTML"
+                            )
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.error(f"Error awarding referral bonus: {safe_error(e)}")
 
     # Final animation frame
     await anim1.edit_text("✅ <b>Account Activated!</b>", parse_mode="HTML")
