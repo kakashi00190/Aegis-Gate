@@ -508,10 +508,11 @@ async def admin_view_report(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bo
     ])
 
     status = '✅ Solved' if report['solved'] else '🔴 Unsolved'
+    media_id_str = f"\nMedia ID: <code>{report['media_id']}</code>" if report.get('media_id') else ""
     text = (
         f"🚨 <b>Report #{report_id}</b>\n\n"
         f"Uploader: <b>{report['uploader_name'] or 'unknown'}</b>\n"
-        f"Media type: {report['media_type'] or '—'}\n"
+        f"Media type: {report['media_type'] or '—'}{media_id_str}\n"
         f"Reported at: {format_datetime(report['reported_at'])}\n"
         f"Status: {status}"
     )
@@ -1797,6 +1798,16 @@ async def cb_report_media(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot)
             InlineKeyboardButton(
                 text="🚫 Ban Uploader",
                 callback_data=f"admin_ban_{media['user_id']}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🗑 Delete Media",
+                callback_data=f"admin_del_media_{report['id']}"
+            ),
+            InlineKeyboardButton(
+                text="🗑 Purge All",
+                callback_data=f"admin_purge_user_media_{media['user_id']}"
             ),
         ]
     ])
