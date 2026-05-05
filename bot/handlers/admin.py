@@ -449,7 +449,7 @@ async def admin_reports(callback: CallbackQuery, pool: asyncpg.Pool):
     buttons = []
     for r in reports:
         ts = r['reported_at'].strftime('%m/%d %H:%M')
-        label = f"#{r['id']} — {r['uploader_name'] or 'unknown'} | {r['media_type'] or '?'} | {ts}"
+        label = f"#{r['id']} — {r['uploader_name'] or 'unknown'} | Media#{r.get('media_id', '?')} | {r['media_type'] or '?'} | {ts}"
         buttons.append([InlineKeyboardButton(
             text=label[:64],
             callback_data=f"admin_view_report_{r['id']}"
@@ -508,11 +508,11 @@ async def admin_view_report(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bo
     ])
 
     status = '✅ Solved' if report['solved'] else '🔴 Unsolved'
-    media_id_str = f"\nMedia ID: <code>{report['media_id']}</code>" if report.get('media_id') else ""
     text = (
         f"🚨 <b>Report #{report_id}</b>\n\n"
+        f"� <b>Media ID: <code>{report.get('media_id', 'N/A')}</code></b>\n"
         f"Uploader: <b>{report['uploader_name'] or 'unknown'}</b>\n"
-        f"Media type: {report['media_type'] or '—'}{media_id_str}\n"
+        f"Media type: {report['media_type'] or '—'}\n"
         f"Reported at: {format_datetime(report['reported_at'])}\n"
         f"Status: {status}"
     )
@@ -1814,9 +1814,10 @@ async def cb_report_media(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot)
 
     caption = (
         f"🚨 <b>New Report #{report['id']}</b>\n\n"
+        f"📎 <b>Media ID: <code>{media_id}</code></b>\n"
         f"Uploader: <b>{uploader_name}</b>\n"
         f"Reporter: <b>{reporter['anonymous_name']}</b>\n"
-        f"Media ID: {media_id} | Type: {media['media_type']}"
+        f"Type: {media['media_type']}"
     )
 
     try:

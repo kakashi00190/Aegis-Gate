@@ -198,18 +198,20 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
     level_up = stats['level_up']
     new_level = stats['new_level']
 
+    # 6. Add to media queue (ALL uploads go to queue regardless of status)
+    await add_media(
+        pool, user_id, session_id,
+        file_id, file_unique_id, media_type,
+        delay, media_group_id,
+        original_chat_id=chat_id,
+        original_message_id=message.message_id
+    )
+
     if user['status'] == 'pending':
         new_total = updated_user['total_media_lifetime']
         if new_total >= activation_threshold:
             activated = await activate_user(pool, user_id)
             if activated:
-                await add_media(
-                    pool, user_id, session_id, 
-                    file_id, file_unique_id, media_type, 
-                    delay, media_group_id,
-                    original_chat_id=chat_id,
-                    original_message_id=message.message_id
-                )
                 await _safe_answer(message,
                     "✅ <b>You are now active!</b>\n\n"
                     "You will start receiving media from other users.\n"
@@ -237,13 +239,6 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         if count >= reactivation_threshold:
             reactivated = await reactivate_user(pool, user_id)
             if reactivated:
-                await add_media(
-                    pool, user_id, session_id, 
-                    file_id, file_unique_id, media_type, 
-                    delay, media_group_id,
-                    original_chat_id=chat_id,
-                    original_message_id=message.message_id
-                )
                 await _safe_answer(message,
                     "✅ <b>You have been reactivated!</b>\n\n"
                     "You will receive media from other users again.\n"
@@ -267,13 +262,6 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         return
 
     if user['status'] == 'active':
-        await add_media(
-            pool, user_id, session_id,
-            file_id, file_unique_id, media_type, 
-            delay, media_group_id,
-            original_chat_id=chat_id,
-            original_message_id=message.message_id
-        )
         if level_up:
             await _safe_answer(message,
                 f"🎉 <b>Level Up!</b> You are now <b>Level {new_level}</b>.",
