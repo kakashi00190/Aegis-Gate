@@ -12,6 +12,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramRetryAfter
+from aiogram.types import CallbackQuery
 
 import config
 from validate_env import main as validate_environment
@@ -20,6 +21,7 @@ from handlers import start, media, commands, admin
 from tasks.broadcast import process_broadcast_queue, sent_messages_logger_task
 from tasks.inactivity import check_inactivity
 from utils.helpers import safe_error
+from utils.callback_guard import is_callback_spam
 from tasks.session import check_session_end
 from tasks.cleanup import cleanup_stale_verifications_task, cleanup_48hr_media_task
 
@@ -206,6 +208,14 @@ async def main():
 
     dp = Dispatcher(storage=MemoryStorage())
     dp["pool"] = pool
+
+    # Callback spam protection — block rapid-fire duplicate callbacks under 0.7s
+    @dp.callback_query()
+    async def callback_spam_guard(callback: CallbackQuery):
+        if is_callback_spam(callback.from_user.id, callback.data or ""):
+            await callback.answer("⏳ Slow down!", show_alert=False)
+            return True  # stop further processing
+        return False  # allow through
 
     # Global error handler for flood control — prevents unhandled TelegramRetryAfter crashes
     @dp.error()

@@ -34,17 +34,52 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
     except Exception as e:
         logger.error(f"Error in _local_store_sent_messages_batch: {safe_error(e)}")
 
-SEND_CONCURRENCY = 5
-SEND_DELAY_BASE = 0.15
+# --- Anti-violation traffic shaping ---
+# Media-type specific concurrency: heavy media gets fewer parallel sends
+MEDIA_CONCURRENCY = {
+    'photo': 5,
+    'video': 3,
+    'document': 3,
+}
+SEND_DELAY_BASE = 0.15       # Base delay, always jittered
 BATCH_SIZE = 10
 MAX_RETRIES = 3
 CHUNK_SIZE = 5
+
+# Broadcast entropy — rotated intro phrases for single-media sends
+# Reduces repetitive message fingerprint detection
+_ENTROPY_PHRASES = [
+    "🔥", "⚡", "📢", "✨", "🎬", "📸", "🎥", "🌟",
+]
+
+# Duplicate send protection: tracks (user_id, media_id) recently sent
+# Prevents resend loops, accidental rebroadcast, duplicate scheduling bugs
+_recent_sends: dict[tuple[int, int], float] = {}  # (user_id, media_id) -> monotonic timestamp
+_RECENT_SENDS_TTL = 300  # 5 minutes
+
+def _check_duplicate_send(user_id: int, media_id: int) -> bool:
+    """Return True if this (user_id, media_id) was sent recently (duplicate)."""
+    now = time.monotonic()
+    key = (user_id, media_id)
+    last = _recent_sends.get(key)
+    if last and now - last < _RECENT_SENDS_TTL:
+        return True  # duplicate
+    _recent_sends[key] = now
+    # Periodic cleanup
+    if len(_recent_sends) > 50000:
+        expired = [k for k, v in _recent_sends.items() if now - v > _RECENT_SENDS_TTL]
+        for k in expired:
+            del _recent_sends[k]
+    return False
 
 _active_users_cache = {
     'users': [],
     'timestamp': time.monotonic() - 1000
 }
 CACHE_TTL = 30  # seconds
+
+# Module-level media semaphores — populated by process_broadcast_queue on startup
+_global_media_semaphores: dict[str, asyncio.Semaphore] = {}
 
 from utils.health import health_monitor
 
@@ -103,6 +138,12 @@ async def send_media_to_user(
     session_id: int
 ) -> bool:
     """Send one or more media items as individual messages or as a media group."""
+    # Duplicate send protection — skip if already sent recently
+    for item in media_items:
+        if _check_duplicate_send(user_id, item['id']):
+            logger.debug(f"Duplicate send skipped: user={user_id} media={item['id']}")
+            return True  # treat as success to avoid retry
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             # Check if this is a media group (album)
@@ -130,19 +171,22 @@ async def send_media_to_user(
                         _sent_messages_queue.put_nowait((user_id, msg.message_id, session_id, m_id))
                 return True
 
-            # Single media item
+            # Single media item — add entropy caption to reduce fingerprint
             item = media_items[0]
             media_type = item['media_type']
             file_id = item['file_id']
             media_id = item['id']
             msg = None
 
+            # Rotate intro emoji for entropy (non-intrusive, doesn't change meaning)
+            entropy = random.choice(_ENTROPY_PHRASES)
+
             if media_type == 'photo':
-                msg = await bot.send_photo(user_id, file_id)
+                msg = await bot.send_photo(user_id, file_id, caption=entropy)
             elif media_type == 'video':
-                msg = await bot.send_video(user_id, file_id)
+                msg = await bot.send_video(user_id, file_id, caption=entropy)
             elif media_type == 'document':
-                msg = await bot.send_document(user_id, file_id)
+                msg = await bot.send_document(user_id, file_id, caption=entropy)
             else:
                 return False
 
@@ -151,12 +195,14 @@ async def send_media_to_user(
             return True
 
         except TelegramRetryAfter as e:
-            # Automatic exponential backoff for flood control
-            wait_time = e.retry_after + 1
-            logger.warning(f"Flood control: User {user_id} or Global limit hit. Waiting {wait_time}s before retry.")
+            # Apply dynamic slowdown to rate limiter
+            global_rate_limiter.apply_flood_pressure()
+            # Worker desynchronization: randomized recovery prevents all workers resuming at once
+            wait_time = e.retry_after + random.uniform(1.0, 3.0)
+            logger.warning(f"Flood control: User {user_id} or Global limit hit. Waiting {wait_time:.1f}s before retry (attempt {attempt}/{MAX_RETRIES}).")
             await asyncio.sleep(wait_time)
-            # After a global flood, add extra jitter to prevent synchronized spikes
-            await asyncio.sleep(random.uniform(0.5, 2.0))
+            # Extra randomized desync jitter after global flood
+            await asyncio.sleep(random.uniform(0.5, 2.5))
             continue
 
         except TelegramForbiddenError as e:
@@ -175,7 +221,8 @@ async def send_media_to_user(
             logger.error(f"Error sending to {user_id}: {safe_error(e)}")
 
             if attempt < MAX_RETRIES:
-                await asyncio.sleep(1)
+                # Randomized retry delay instead of fixed 1s
+                await asyncio.sleep(random.uniform(1.5, 4.0))
             else:
                 return False
 
@@ -193,8 +240,10 @@ async def _send_with_semaphore(
     async with semaphore:
         await global_rate_limiter.consume()
         result = await send_media_to_user(bot, pool, user_id, media_items, session_id)
-        jitter = random.uniform(0.8, 1.2)
-        await asyncio.sleep(SEND_DELAY_BASE * jitter)
+        # Randomized delay with dynamic slowdown applied
+        jitter = random.uniform(0.8, 1.5)
+        delay = SEND_DELAY_BASE * jitter * global_rate_limiter.slowdown
+        await asyncio.sleep(delay)
         return result
 
 
@@ -215,6 +264,13 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
         await unclaim_broadcast(pool, m_ids)
         return
 
+    # Shuffle recipients for organic delivery order — prevents identical send patterns
+    random.shuffle(target_users)
+
+    # Select semaphore by media type for pool separation
+    media_type = first_item.get('media_type', 'photo')
+    type_semaphore = _global_media_semaphores.get(media_type, semaphore)
+
     start_time = time.monotonic()
     sent_count = 0
     fail_count = 0
@@ -224,7 +280,7 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
         chunk = target_users[i:i + CHUNK_SIZE]
         tasks = [
             _send_with_semaphore(
-                semaphore, bot, pool,
+                type_semaphore, bot, pool,
                 recipient['id'], media_items, session_id
             )
             for recipient in chunk
@@ -237,10 +293,9 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
             else:
                 fail_count += 1
 
-        # Breathing room between chunks to let the rate limiter recover
-        # and allow handler responses to get through
+        # Randomized breathing room between chunks — prevents robotic timing
         if i + CHUNK_SIZE < total_targets:
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(random.uniform(0.2, 0.8))
 
     elapsed = round(time.monotonic() - start_time, 1)
     type_label = "album" if len(media_items) > 1 else "media"
@@ -257,7 +312,18 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
 
 
 async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
-    semaphore = asyncio.Semaphore(SEND_CONCURRENCY)
+    # Per-media-type semaphores for pool separation
+    _media_semaphores = {
+        'photo': asyncio.Semaphore(MEDIA_CONCURRENCY['photo']),
+        'video': asyncio.Semaphore(MEDIA_CONCURRENCY['video']),
+        'document': asyncio.Semaphore(MEDIA_CONCURRENCY['document']),
+    }
+    # Fallback semaphore for unknown types
+    default_semaphore = asyncio.Semaphore(MEDIA_CONCURRENCY['photo'])
+    # Make semaphores accessible to broadcast_item
+    global _global_media_semaphores
+    _global_media_semaphores = _media_semaphores
+
     last_status_log = time.monotonic()
 
     while True:
@@ -265,7 +331,7 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
         try:
             paused, _ = await is_session_paused(pool)
             if paused:
-                await asyncio.sleep(5)
+                await asyncio.sleep(random.uniform(3, 8))
                 continue
 
             # CRITICAL FIX: Check recipients BEFORE claiming broadcasts
@@ -274,25 +340,25 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             
             # Diagnostic log
             now = time.monotonic()
-            if now - last_status_log > 60: # More frequent logs for debugging
-                logger.info(f"Broadcast loop heart-beat: {len(recipients)} active recipients.")
+            if now - last_status_log > 60:
+                logger.info(f"Broadcast loop heart-beat: {len(recipients)} active recipients, slowdown={global_rate_limiter.slowdown:.2f}x")
                 last_status_log = now
 
             if not recipients:
-                await asyncio.sleep(10)
+                await asyncio.sleep(random.uniform(5, 15))
                 continue
 
             # Limit how many items we process at once to avoid DB/Network overload
-            raw_items = await claim_due_broadcasts(pool, limit=10) # Reduced from BATCH_SIZE (20)
+            raw_items = await claim_due_broadcasts(pool, limit=10)
             if not raw_items:
                 # Periodic status log even if no items
                 now = time.monotonic()
-                if now - last_status_log > 300: # Log every 5 mins
+                if now - last_status_log > 300:
                     config_data = await get_config(pool)
                     delay = config_data.get('broadcast_delay_seconds', '30')
                     logger.info(f"Broadcast queue: {len(recipients)} recipients, but no items due. (Delay: {delay}s)")
                     last_status_log = now
-                await asyncio.sleep(2) # Wait slightly longer
+                await asyncio.sleep(random.uniform(1.5, 4.0))
                 continue
 
             logger.info(f"Claimed {len(raw_items)} media items for broadcast to {len(recipients)} potential recipients.")
@@ -309,8 +375,10 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             # Process broadcast items sequentially to avoid overwhelming the rate limiter
             # when many grouped items are claimed at once
             for items in grouped_media.values():
-                await broadcast_item(bot, pool, items, recipients, semaphore)
+                await broadcast_item(bot, pool, items, recipients, default_semaphore)
+                # Randomized gap between broadcast items — prevents robotic timing
+                await asyncio.sleep(random.uniform(0.3, 1.5))
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {safe_error(e)}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(random.uniform(3, 10))

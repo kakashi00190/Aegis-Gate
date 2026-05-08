@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import random
 from datetime import datetime, timedelta, timezone
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError, TelegramBadRequest
@@ -41,8 +42,11 @@ async def _delete_one_message(
             await bot.delete_message(chat_id, message_id)
             return True
         except TelegramRetryAfter as e:
-            # Handle rate limit from Telegram specifically
-            await asyncio.sleep(e.retry_after)
+            # Apply dynamic slowdown + randomized recovery (desync workers)
+            global_rate_limiter.apply_flood_pressure()
+            wait = e.retry_after + random.uniform(0.5, 2.0)
+            logger.warning(f"Cleanup flood control: waiting {wait:.1f}s")
+            await asyncio.sleep(wait)
             try:
                 await bot.delete_message(chat_id, message_id)
                 return True

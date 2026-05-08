@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 from datetime import datetime, timezone
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError
@@ -20,7 +21,8 @@ async def _send_all(bot: Bot, pool: asyncpg.Pool, text: str):
             await mark_user_blocked(pool, user['id'])
         except Exception:
             pass
-        await asyncio.sleep(0.05)
+        # Randomized delay — prevents robotic broadcast timing
+        await asyncio.sleep(random.uniform(0.04, 0.08))
 
 
 async def broadcast_session_end(bot: Bot, pool: asyncpg.Pool, result: dict, pause_hours: float):
@@ -100,7 +102,8 @@ async def broadcast_new_session_started(bot: Bot, pool: asyncpg.Pool, new_sessio
             await mark_user_blocked(pool, user['id'])
         except Exception:
             pass
-        await asyncio.sleep(0.05)
+        # Randomized delay — prevents robotic broadcast timing
+        await asyncio.sleep(random.uniform(0.04, 0.08))
 
 
 async def broadcast_session_results(bot: Bot, pool: asyncpg.Pool, result: dict, pause_hours: float):
