@@ -161,7 +161,7 @@ async def init_db(pool: asyncpg.Pool):
             "users_referred_by"
         ),
         (
-            "SELECT data_type FROM information_schema.columns WHERE table_name='users' AND column_name='referred_by' AND data_type='integer'",
+            "SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='referred_by' AND data_type='integer') THEN NULL ELSE 1 END",
             "ALTER TABLE users ALTER COLUMN referred_by TYPE BIGINT",
             "users_referred_by_bigint"
         ),
