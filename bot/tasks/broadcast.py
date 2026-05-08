@@ -41,7 +41,7 @@ MEDIA_CONCURRENCY = {
     'video': 5,
     'document': 5,
 }
-SEND_DELAY_BASE = 0.15       # Base delay, always jittered
+SEND_DELAY_BASE = 0.05       # Base delay, always jittered (rate limiter does the heavy pacing)
 BATCH_SIZE = 10
 MAX_RETRIES = 3
 CHUNK_SIZE = 10
@@ -380,15 +380,11 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                     grouped_media[group_key] = []
                 grouped_media[group_key].append(dict(item))
 
-            # Process broadcast items concurrently (up to 3 at a time)
-            # The rate limiter + per-type semaphores already enforce Telegram limits
-            broadcast_semaphore = asyncio.Semaphore(3)
-            async def _broadcast_with_limit(items):
-                async with broadcast_semaphore:
-                    await broadcast_item(bot, pool, items, recipients, default_semaphore)
-                    await asyncio.sleep(random.uniform(0.3, 1.0))
-
-            await asyncio.gather(*[_broadcast_with_limit(items) for items in grouped_media.values()])
+            # Process broadcast items sequentially — concurrency just causes rate limiter
+            # contention (total throughput is capped at rate limiter regardless)
+            for items in grouped_media.values():
+                await broadcast_item(bot, pool, items, recipients, default_semaphore)
+                await asyncio.sleep(random.uniform(0.3, 1.0))
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {safe_error(e)}")

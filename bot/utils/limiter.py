@@ -54,6 +54,6 @@ class TokenBucketLimiter:
             self.tokens -= 1
 
 # Telegram allows ~30 messages per second to different users
-# We use 8 — conservative enough to avoid spam detection while
-# allowing handler responses room alongside broadcast sends
-global_rate_limiter = TokenBucketLimiter(rate=8, capacity=12)
+# We use 20 — leaves room for handler responses while dramatically
+# improving broadcast throughput (was 8, too slow for 180+ recipients)
+global_rate_limiter = TokenBucketLimiter(rate=20, capacity=30)
