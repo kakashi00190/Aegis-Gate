@@ -37,14 +37,14 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
 # --- Anti-violation traffic shaping ---
 # Media-type specific concurrency: heavy media gets fewer parallel sends
 MEDIA_CONCURRENCY = {
-    'photo': 5,
-    'video': 3,
-    'document': 3,
+    'photo': 10,
+    'video': 5,
+    'document': 5,
 }
 SEND_DELAY_BASE = 0.15       # Base delay, always jittered
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 5
+CHUNK_SIZE = 10
 
 # Broadcast entropy — rotated intro phrases for single-media sends
 # Reduces repetitive message fingerprint detection
@@ -356,8 +356,8 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 await asyncio.sleep(random.uniform(5, 15))
                 continue
 
-            # Claim up to 50 items per cycle to keep queue moving (was 10 — too slow for 3k+ backlog)
-            raw_items = await claim_due_broadcasts(pool, limit=50)
+            # Claim up to 100 items per cycle to keep queue moving (was 10 — too slow for 3k+ backlog)
+            raw_items = await claim_due_broadcasts(pool, limit=100)
             if not raw_items:
                 # Periodic status log even if no items
                 now = time.monotonic()
