@@ -225,14 +225,14 @@ async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
         )
         return
 
-    # Store referral info in FSM for later use after verification
+    # Store referral info in DB (pending_verifications) for survival across FSM loss
     await state.update_data(referral_code=referral_code)
 
     if pending:
         # User already passed disclaimer/terms but is mid-verification
         reserved_name = pending['reserved_name']
         question, new_answer = make_math_question()
-        await save_pending_verification(pool, user_id, new_answer, reserved_name)
+        await save_pending_verification(pool, user_id, new_answer, reserved_name, referral_code=referral_code)
         await state.set_state(VerificationState.waiting_answer)
         await state.update_data(answer=new_answer, referral_code=referral_code)
         await message.answer(
@@ -318,11 +318,12 @@ async def terms_accept(callback: CallbackQuery, state: FSMContext, pool: asyncpg
         attempts += 1
 
     question, answer = make_math_question()
-    await save_pending_verification(pool, user_id, answer, name)
-    await state.set_state(VerificationState.waiting_answer)
-    # Preserve referral_code from previous FSM data (set in cmd_start)
+    # Preserve referral_code from FSM and store in DB
     existing_data = await state.get_data()
-    await state.update_data(answer=answer, referral_code=existing_data.get('referral_code'))
+    ref_code_fsm = existing_data.get('referral_code')
+    await save_pending_verification(pool, user_id, answer, name, referral_code=ref_code_fsm)
+    await state.set_state(VerificationState.waiting_answer)
+    await state.update_data(answer=answer, referral_code=ref_code_fsm)
 
     await callback.message.answer(
         "🔐 <b>Verification Required</b>\n\n"
@@ -398,22 +399,26 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
     except (ValueError, AttributeError):
         question, new_answer = make_math_question()
         reserved_name = pending['reserved_name']
+        # referral_code preserved in DB via COALESCE — no need to re-pass
         await save_pending_verification(pool, message.from_user.id, new_answer, reserved_name)
-        await state.update_data(answer=new_answer)
+        existing_data = await state.get_data()
+        await state.update_data(answer=new_answer, referral_code=existing_data.get('referral_code'))
         await message.answer(f"❌ Numbers only. Try again:\n\n<code>{question}</code>")
         return
 
     if user_answer != correct:
         question, new_answer = make_math_question()
         reserved_name = pending['reserved_name']
+        # referral_code preserved in DB via COALESCE — no need to re-pass
         await save_pending_verification(pool, message.from_user.id, new_answer, reserved_name)
-        await state.update_data(answer=new_answer)
+        existing_data = await state.get_data()
+        await state.update_data(answer=new_answer, referral_code=existing_data.get('referral_code'))
         await message.answer(f"❌ Wrong. Try this one:\n\n<code>{question}</code>")
         return
 
-    # Read referral_code BEFORE clearing state
+    # Read referral_code from DB (primary) and FSM (fallback) BEFORE clearing state
     data = await state.get_data()
-    referral_code_from_link = data.get('referral_code')
+    referral_code_from_link = pending.get('referral_code') or data.get('referral_code')
     await state.clear()
 
     # Optimized verification context fetch

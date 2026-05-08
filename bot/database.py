@@ -176,6 +176,11 @@ async def init_db(pool: asyncpg.Pool):
             "users_referral_awarded"
         ),
         (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='pending_verifications' AND column_name='referral_code'",
+            "ALTER TABLE pending_verifications ADD COLUMN referral_code VARCHAR(8)",
+            "pending_verifications_referral_code"
+        ),
+        (
             "SELECT 1 FROM information_schema.columns WHERE table_name='media' AND column_name='original_message_id'",
             "ALTER TABLE media ADD COLUMN original_message_id BIGINT",
             "media_original_message_id"
@@ -418,14 +423,14 @@ async def name_exists(pool: asyncpg.Pool, name: str) -> bool:
         return True  # Fail-safe: assume name exists to prevent duplicate constraint violation
 
 
-async def save_pending_verification(pool: asyncpg.Pool, user_id: int, answer: int, reserved_name: str):
+async def save_pending_verification(pool: asyncpg.Pool, user_id: int, answer: int, reserved_name: str, referral_code: str = None):
     try:
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO pending_verifications (user_id, answer, reserved_name) VALUES ($1, $2, $3) "
-                    "ON CONFLICT (user_id) DO UPDATE SET answer = $2, reserved_name = $3, created_at = NOW()",
-                    user_id, answer, reserved_name
+                    "INSERT INTO pending_verifications (user_id, answer, reserved_name, referral_code) VALUES ($1, $2, $3, $4) "
+                    "ON CONFLICT (user_id) DO UPDATE SET answer = $2, reserved_name = $3, referral_code = COALESCE($4, pending_verifications.referral_code), created_at = NOW()",
+                    user_id, answer, reserved_name, referral_code
                 )
     except Exception as e:
         logger.error(f"Error saving verification for {user_id}: {safe_error(e)}")
