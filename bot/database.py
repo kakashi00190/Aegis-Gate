@@ -171,6 +171,11 @@ async def init_db(pool: asyncpg.Pool):
             "media_original_chat_id"
         ),
         (
+            "SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='referral_awarded'",
+            "ALTER TABLE users ADD COLUMN referral_awarded BOOLEAN DEFAULT FALSE",
+            "users_referral_awarded"
+        ),
+        (
             "SELECT 1 FROM information_schema.columns WHERE table_name='media' AND column_name='original_message_id'",
             "ALTER TABLE media ADD COLUMN original_message_id BIGINT",
             "media_original_message_id"

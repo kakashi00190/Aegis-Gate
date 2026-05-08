@@ -10,7 +10,7 @@ from database import (
     get_user, get_config, get_current_session, is_session_paused,
     add_media, update_user_on_upload, activate_user, reactivate_user,
     increment_inactive_uploads, get_upload_context,
-    get_user_by_referral_code, get_referral_count, set_referred_by
+    get_referral_count
 )
 from utils.helpers import contains_link, format_timedelta_until, safe_error
 from utils.levels import referral_badge_for_count, referral_exp_bonus, REFERRAL_BADGES
@@ -26,9 +26,10 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
         user = await get_user(pool, newly_active_user_id)
         if not user or not user.get('referred_by'):
             return
+        # Already awarded? Skip
+        if user.get('referral_awarded'):
+            return
         referrer_id = user['referred_by']
-        # Only award once — clear referred_by to prevent re-awarding
-        await set_referred_by(pool, newly_active_user_id, None)
 
         referrer = await get_user(pool, referrer_id)
         if not referrer:
@@ -36,6 +37,11 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
 
         bonus = referral_exp_bonus(referrer['level'])
         async with pool.acquire() as conn:
+            # Mark as awarded FIRST to prevent double-award race
+            await conn.execute(
+                "UPDATE users SET referral_awarded = TRUE WHERE id = $1",
+                newly_active_user_id
+            )
             await conn.execute(
                 "UPDATE users SET exp = exp + $2 WHERE id = $1",
                 referrer_id, bonus
