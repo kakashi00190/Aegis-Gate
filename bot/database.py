@@ -766,7 +766,7 @@ async def set_referred_by(pool: asyncpg.Pool, user_id: int, referrer_id: int) ->
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 result = await conn.execute(
-                    "UPDATE users SET referred_by = $2 WHERE id = $1",
+                    "UPDATE users SET referred_by = $2::bigint WHERE id = $1",
                     user_id, referrer_id
                 )
                 return result.endswith("1")
@@ -780,7 +780,7 @@ async def get_referral_count(pool: asyncpg.Pool, user_id: int) -> int:
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 return await conn.fetchval(
-                    "SELECT COUNT(*) FROM users WHERE referred_by = $1", user_id
+                    "SELECT COUNT(*) FROM users WHERE referred_by = $1::bigint", user_id
                 ) or 0
     except Exception as e:
         logger.error(f"Error counting referrals for {user_id}: {safe_error(e)}")
