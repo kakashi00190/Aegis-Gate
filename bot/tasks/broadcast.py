@@ -363,9 +363,11 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 try:
                     async with pool.acquire() as conn:
                         released = await conn.fetchval(
-                            "UPDATE media SET claimed_at = NULL "
-                            "WHERE claimed_at IS NOT NULL AND sent_at IS NULL "
-                            "RETURNING count(id)"
+                            "WITH stale AS ("
+                            "  UPDATE media SET claimed_at = NULL "
+                            "  WHERE claimed_at IS NOT NULL AND sent_at IS NULL "
+                            "  RETURNING id"
+                            ") SELECT count(*) FROM stale"
                         )
                         if released:
                             logger.info(f"Startup: released {released} stale-claimed media items back to queue")
