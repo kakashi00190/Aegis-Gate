@@ -135,7 +135,8 @@ async def send_media_to_user(
     pool: asyncpg.Pool,
     user_id: int,
     media_items: List[dict],
-    session_id: int
+    session_id: int,
+    uploader_name: str = '?'
 ) -> bool:
     """Send one or more media items as individual messages or as a media group."""
     # Duplicate send protection — skip if already sent recently
@@ -144,20 +145,25 @@ async def send_media_to_user(
             logger.debug(f"Duplicate send skipped: user={user_id} media={item['id']}")
             return True  # treat as success to avoid retry
 
+    # Build uploader credit caption
+    credit = f"📸 {uploader_name}" if uploader_name and uploader_name != '?' else None
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             # Check if this is a media group (album)
             if len(media_items) > 1:
                 media_group = []
-                for item in media_items:
+                for idx, item in enumerate(media_items):
                     m_type = item['media_type']
                     f_id = item['file_id']
+                    # Only first item in album gets the caption (Telegram limitation)
+                    cap = credit if idx == 0 else None
                     if m_type == 'photo':
-                        media_group.append(InputMediaPhoto(media=f_id))
+                        media_group.append(InputMediaPhoto(media=f_id, caption=cap))
                     elif m_type == 'video':
-                        media_group.append(InputMediaVideo(media=f_id))
+                        media_group.append(InputMediaVideo(media=f_id, caption=cap))
                     elif m_type == 'document':
-                        media_group.append(InputMediaDocument(media=f_id))
+                        media_group.append(InputMediaDocument(media=f_id, caption=cap))
 
                 messages = await bot.send_media_group(user_id, media_group)
                 if messages and session_id:
@@ -171,22 +177,23 @@ async def send_media_to_user(
                         _sent_messages_queue.put_nowait((user_id, msg.message_id, session_id, m_id))
                 return True
 
-            # Single media item — add entropy caption to reduce fingerprint
+            # Single media item — add uploader name + entropy caption
             item = media_items[0]
             media_type = item['media_type']
             file_id = item['file_id']
             media_id = item['id']
             msg = None
 
-            # Rotate intro emoji for entropy (non-intrusive, doesn't change meaning)
+            # Combine uploader credit with entropy emoji for anti-fingerprint
             entropy = random.choice(_ENTROPY_PHRASES)
+            caption = f"{credit} {entropy}" if credit else entropy
 
             if media_type == 'photo':
-                msg = await bot.send_photo(user_id, file_id, caption=entropy)
+                msg = await bot.send_photo(user_id, file_id, caption=caption)
             elif media_type == 'video':
-                msg = await bot.send_video(user_id, file_id, caption=entropy)
+                msg = await bot.send_video(user_id, file_id, caption=caption)
             elif media_type == 'document':
-                msg = await bot.send_document(user_id, file_id, caption=entropy)
+                msg = await bot.send_document(user_id, file_id, caption=caption)
             else:
                 return False
 
@@ -235,11 +242,12 @@ async def _send_with_semaphore(
     pool: asyncpg.Pool,
     user_id: int,
     media_items: List[dict],
-    session_id: int
+    session_id: int,
+    uploader_name: str = '?'
 ) -> bool:
     async with semaphore:
         await global_rate_limiter.consume()
-        result = await send_media_to_user(bot, pool, user_id, media_items, session_id)
+        result = await send_media_to_user(bot, pool, user_id, media_items, session_id, uploader_name)
         # Randomized delay with dynamic slowdown applied
         jitter = random.uniform(0.8, 1.5)
         delay = SEND_DELAY_BASE * jitter * global_rate_limiter.slowdown
@@ -281,7 +289,7 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
         tasks = [
             _send_with_semaphore(
                 type_semaphore, bot, pool,
-                recipient['id'], media_items, session_id
+                recipient['id'], media_items, session_id, uploader_name
             )
             for recipient in chunk
         ]
