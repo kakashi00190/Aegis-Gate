@@ -44,7 +44,7 @@ MEDIA_CONCURRENCY = {
 SEND_DELAY_BASE = 0.05       # Base delay, always jittered (rate limiter does the heavy pacing)
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 10
+CHUNK_SIZE = 20
 
 # Broadcast entropy — rotated intro phrases for single-media sends
 # Reduces repetitive message fingerprint detection
@@ -356,7 +356,23 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 await asyncio.sleep(random.uniform(5, 15))
                 continue
 
-            # Claim up to 100 items per cycle to keep queue moving (was 10 — too slow for 3k+ backlog)
+            # On first iteration after startup, release stale claims from previous instances
+            # This must happen BEFORE the first claim so items are available
+            if not hasattr(process_broadcast_queue, '_startup_unclaim_done'):
+                setattr(process_broadcast_queue, '_startup_unclaim_done', True)
+                try:
+                    async with pool.acquire() as conn:
+                        released = await conn.fetchval(
+                            "UPDATE media SET claimed_at = NULL "
+                            "WHERE claimed_at IS NOT NULL AND sent_at IS NULL "
+                            "RETURNING count(id)"
+                        )
+                        if released:
+                            logger.info(f"Startup: released {released} stale-claimed media items back to queue")
+                except Exception as e:
+                    logger.error(f"Startup unclaim error: {safe_error(e)}")
+
+            # Claim up to 100 items per cycle to keep queue moving
             raw_items = await claim_due_broadcasts(pool, limit=100)
             if not raw_items:
                 # Periodic status log even if no items

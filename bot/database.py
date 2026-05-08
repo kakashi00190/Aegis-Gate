@@ -1082,7 +1082,7 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
                     """SELECT id, media_group_id FROM media
                        WHERE scheduled_at <= NOW()
                          AND sent_at IS NULL
-                         AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '5 minutes')
+                         AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')
                        ORDER BY scheduled_at ASC
                        LIMIT $1
                        FOR UPDATE SKIP LOCKED""",
