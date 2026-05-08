@@ -9,13 +9,85 @@ import asyncpg
 from database import (
     get_user, get_config, get_current_session, is_session_paused,
     add_media, update_user_on_upload, activate_user, reactivate_user,
-    increment_inactive_uploads, get_upload_context
+    increment_inactive_uploads, get_upload_context,
+    get_user_by_referral_code, get_referral_count, set_referred_by
 )
-from utils.helpers import contains_link, format_timedelta_until
+from utils.helpers import contains_link, format_timedelta_until, safe_error
+from utils.levels import referral_badge_for_count, referral_exp_bonus, REFERRAL_BADGES
 from config import is_admin
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_id: int):
+    """Award EXP and badge to referrer when their referral activates."""
+    try:
+        user = await get_user(pool, newly_active_user_id)
+        if not user or not user.get('referred_by'):
+            return
+        referrer_id = user['referred_by']
+        # Only award once — clear referred_by to prevent re-awarding
+        await set_referred_by(pool, newly_active_user_id, None)
+
+        referrer = await get_user(pool, referrer_id)
+        if not referrer:
+            return
+
+        bonus = referral_exp_bonus(referrer['level'])
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET exp = exp + $2 WHERE id = $1",
+                referrer_id, bonus
+            )
+            # Check for referral badge upgrade
+            ref_count = await get_referral_count(pool, referrer_id)
+            badge_info = referral_badge_for_count(ref_count)
+            if badge_info:
+                emoji, title = badge_info
+                existing_badges = referrer.get('badge_emoji') or ''
+                if emoji not in existing_badges:
+                    new_badges = f"{existing_badges},{emoji}" if existing_badges else emoji
+                    await conn.execute(
+                        "UPDATE users SET badge_emoji = $1 WHERE id = $2",
+                        new_badges, referrer_id
+                    )
+                    try:
+                        await bot.send_message(
+                            referrer_id,
+                            f"🏅 <b>New Referral Badge Unlocked!</b>\n\n"
+                            f"{emoji} <b>{title}</b>\n"
+                            f"You've referred <b>{ref_count}</b> active users!\n\n"
+                            f"+{bonus} EXP awarded for this referral.",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await bot.send_message(
+                            referrer_id,
+                            f"🎁 <b>Referral Activated!</b>\n\n"
+                            f"Your referral just activated their account!\n"
+                            f"+{bonus} EXP",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+            else:
+                try:
+                    await bot.send_message(
+                        referrer_id,
+                        f"🎁 <b>Referral Activated!</b>\n\n"
+                        f"Your referral just activated their account!\n"
+                        f"+{bonus} EXP\n\n"
+                        f"Refer {REFERRAL_BADGES[0][0]} people to unlock your first badge!",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f"Error awarding referral bonus for {newly_active_user_id}: {safe_error(e)}")
 
 
 async def _safe_answer(message: Message, text: str, **kwargs):
@@ -212,6 +284,8 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         if new_total >= activation_threshold:
             activated = await activate_user(pool, user_id)
             if activated:
+                # Award referral bonus to referrer (if any) now that user is active
+                await _award_referral_bonus(bot, pool, user_id)
                 await _safe_answer(message,
                     "✅ <b>You are now active!</b>\n\n"
                     "You will start receiving media from other users.\n"

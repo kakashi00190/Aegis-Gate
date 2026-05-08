@@ -329,7 +329,7 @@ async def admin_invite_key_rotate(callback: CallbackQuery, pool: asyncpg.Pool):
     if not is_admin(callback.from_user.id):
         return
     import secrets
-    new_key = secrets.token_urlsafe(8)[:10]
+    new_key = secrets.token_hex(5)[:10]
     await set_invite_key(pool, new_key)
     bot_username = (await callback.bot.get_me()).username
     link = f"https://t.me/{bot_username}?start={new_key}"

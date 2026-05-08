@@ -207,10 +207,15 @@ async def cmd_start(message: Message, state: FSMContext, pool: asyncpg.Pool):
         return
 
     # Parse key and optional referral code from deeplink
-    # Format: invite_key  or  invite_key_REFERRALCODE
-    parts = args.split("_", 1)
-    provided_key = parts[0]
-    referral_code = parts[1] if len(parts) > 1 else None
+    # Format: invite_key  or  invite_key--REFERRALCODE
+    # Using -- as separator since _ can appear in token_urlsafe invite keys
+    if "--" in args:
+        parts = args.split("--", 1)
+        provided_key = parts[0]
+        referral_code = parts[1] if len(parts) > 1 else None
+    else:
+        provided_key = args
+        referral_code = None
 
     if provided_key != invite_key:
         await message.answer(
@@ -315,7 +320,9 @@ async def terms_accept(callback: CallbackQuery, state: FSMContext, pool: asyncpg
     question, answer = make_math_question()
     await save_pending_verification(pool, user_id, answer, name)
     await state.set_state(VerificationState.waiting_answer)
-    await state.update_data(answer=answer)
+    # Preserve referral_code from previous FSM data (set in cmd_start)
+    existing_data = await state.get_data()
+    await state.update_data(answer=answer, referral_code=existing_data.get('referral_code'))
 
     await callback.message.answer(
         "🔐 <b>Verification Required</b>\n\n"
@@ -450,70 +457,22 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
         ref_code = _generate_referral_code()
     await set_referral_code(pool, message.from_user.id, ref_code)
 
-    # Handle referral tracking + reward referrer
+    # Handle referral tracking (store referred_by only — EXP awarded at activation)
     if referral_code_from_link:
         referrer = await get_user_by_referral_code(pool, referral_code_from_link)
         if referrer and referrer['id'] != message.from_user.id:
             await set_referred_by(pool, message.from_user.id, referrer['id'])
-            # Award EXP bonus to referrer
-            bonus = referral_exp_bonus(referrer['level'])
+            # Notify referrer that someone signed up via their link
             try:
-                async with pool.acquire() as conn:
-                    new_level = await conn.fetchval(
-                        "UPDATE users SET exp = exp + $2 WHERE id = $1 RETURNING level",
-                        referrer['id'], bonus
-                    )
-                    # Check for referral badge upgrade
-                    ref_count = await get_referral_count(pool, referrer['id'])
-                    badge_info = referral_badge_for_count(ref_count)
-                    if badge_info:
-                        emoji, title = badge_info
-                        existing_badges = referrer.get('badge_emoji') or ''
-                        if emoji not in existing_badges:
-                            new_badges = f"{existing_badges},{emoji}" if existing_badges else emoji
-                            await conn.execute(
-                                "UPDATE users SET badge_emoji = $1 WHERE id = $2",
-                                new_badges, referrer['id']
-                            )
-                            # Notify referrer of new badge
-                            try:
-                                await message.bot.send_message(
-                                    referrer['id'],
-                                    f"🏅 <b>New Referral Badge Unlocked!</b>\n\n"
-                                    f"{emoji} <b>{title}</b>\n"
-                                    f"You've referred <b>{ref_count}</b> users!\n\n"
-                                    f"+{bonus} EXP awarded for this referral.",
-                                    parse_mode="HTML"
-                                )
-                            except Exception:
-                                pass
-                        else:
-                            # Already has badge, just notify EXP
-                            try:
-                                await message.bot.send_message(
-                                    referrer['id'],
-                                    f"🎁 <b>Referral Bonus!</b>\n\n"
-                                    f"Someone joined via your link!\n"
-                                    f"+{bonus} EXP",
-                                    parse_mode="HTML"
-                                )
-                            except Exception:
-                                pass
-                    else:
-                        # No badge yet, just notify EXP
-                        try:
-                            await message.bot.send_message(
-                                referrer['id'],
-                                f"🎁 <b>Referral Bonus!</b>\n\n"
-                                f"Someone joined via your link!\n"
-                                f"+{bonus} EXP\n\n"
-                                f"Refer {REFERRAL_BADGES[0][0]} people to unlock your first badge!",
-                                parse_mode="HTML"
-                            )
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.error(f"Error awarding referral bonus: {safe_error(e)}")
+                await message.bot.send_message(
+                    referrer['id'],
+                    "👋 <b>New referral signed up!</b>\n\n"
+                    "They need to activate their account first.\n"
+                    "You'll receive your EXP bonus when they activate!",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
 
     # Final animation frame
     await anim1.edit_text("✅ <b>Account Activated!</b>", parse_mode="HTML")
@@ -536,7 +495,7 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
 
     # Send referral card
     invite_key = await get_invite_key(pool)
-    link = f"https://t.me/{BOT_USERNAME}?start={invite_key}_{ref_code}"
+    link = f"https://t.me/{BOT_USERNAME}?start={invite_key}--{ref_code}"
     await message.answer(
         "🎁 <b>Invite Friends & Earn</b>\n\n"
         "🔗 <b>Your Personal Invite Link</b>\n\n"

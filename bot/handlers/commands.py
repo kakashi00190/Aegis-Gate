@@ -330,7 +330,7 @@ async def cmd_referral(message: Message, pool: asyncpg.Pool):
 
     invite_key = await get_invite_key(pool)
     bot_username = (await message.bot.get_me()).username
-    link = f"https://t.me/{bot_username}?start={invite_key}_{ref_code}"
+    link = f"https://t.me/{bot_username}?start={invite_key}--{ref_code}"
     count = await get_referral_count(pool, message.from_user.id)
 
     # Badge progress
