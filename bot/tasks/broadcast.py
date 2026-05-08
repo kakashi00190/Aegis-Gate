@@ -356,8 +356,8 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 await asyncio.sleep(random.uniform(5, 15))
                 continue
 
-            # Limit how many items we process at once to avoid DB/Network overload
-            raw_items = await claim_due_broadcasts(pool, limit=10)
+            # Claim up to 50 items per cycle to keep queue moving (was 10 — too slow for 3k+ backlog)
+            raw_items = await claim_due_broadcasts(pool, limit=50)
             if not raw_items:
                 # Periodic status log even if no items
                 now = time.monotonic()
