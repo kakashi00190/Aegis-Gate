@@ -5,6 +5,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Admin ID for ban wave notifications
+ADMIN_ID = 8671192757
+
 class BanWaveDetector:
     """Detects Telegram ban waves from FloodWait patterns and triggers auto-dodge"""
     
@@ -36,9 +39,36 @@ class BanWaveDetector:
             if not self.ban_wave_detected:
                 self.ban_wave_detected = True
                 self.dodge_until = now + random.uniform(300, 600)  # 5-10 min dodge
-                logger.warning(f" BAN WAVE DETECTED! {recent_count} FloodWaits in {self.detection_window}s. Dodging for {self.dodge_until - now:.0f}s")
+                dodge_duration = self.dodge_until - now
+                
+                # Log to system
+                logger.warning(f" BAN WAVE DETECTED! {recent_count} FloodWaits in {self.detection_window}s. Dodging for {dodge_duration:.0f}s")
+                
+                # Schedule admin notification (async, don't block)
+                asyncio.create_task(self._notify_admin_ban_wave(recent_count, dodge_duration))
                 return True
         return False
+    
+    async def _notify_admin_ban_wave(self, flood_count: int, dodge_duration: float):
+        """Send admin-only notification about ban wave detection"""
+        try:
+            # Import here to avoid circular imports
+            from aiogram import Bot
+            from config import BOT_TOKEN
+            
+            bot = Bot(token=BOT_TOKEN)
+            await bot.send_message(
+                ADMIN_ID,
+                f"🚨 <b>BAN WAVE DETECTED</b>\n\n"
+                f"• {flood_count} FloodWaits in 60s\n"
+                f"• Auto-dodge activated\n"
+                f"• Pausing broadcasts for {dodge_duration:.0f}s\n"
+                f"• Bot will resume automatically\n\n"
+                f"This prevents potential ban. Monitor logs.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify admin about ban wave: {e}")
     
     def should_dodge(self) -> bool:
         """Check if we should pause broadcasts due to ban wave"""
@@ -52,7 +82,30 @@ class BanWaveDetector:
                 self.floodwait_times = []
                 self.floodwait_durations = []
                 logger.info(" Ban wave subsided. Resuming normal operations.")
+                
+                # Notify admin that ban wave is over
+                asyncio.create_task(self._notify_admin_recovery())
         return False
+    
+    async def _notify_admin_recovery(self):
+        """Send admin-only notification when ban wave subsides"""
+        try:
+            # Import here to avoid circular imports
+            from aiogram import Bot
+            from config import BOT_TOKEN
+            
+            bot = Bot(token=BOT_TOKEN)
+            await bot.send_message(
+                ADMIN_ID,
+                f"✅ <b>BAN WAVE SUBSIDED</b>\n\n"
+                f"• Auto-dodge completed\n"
+                f"• Resuming normal broadcasts\n"
+                f"• Monitoring for new patterns\n\n"
+                f"Bot is operating normally again.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify admin about recovery: {e}")
     
     def get_status(self) -> dict:
         """Get current detector status for monitoring"""
