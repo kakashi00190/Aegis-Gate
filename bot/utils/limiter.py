@@ -180,6 +180,6 @@ class TokenBucketLimiter:
             self.wait_count = 0
 
 # Telegram allows ~30 messages per second to different users
-# We use 15 — conservative but stable. 20+ caused FloodWaits.
-# Lower concurrency (5 photo) + lower rate = no FloodWait cascades.
-global_rate_limiter = TokenBucketLimiter(rate=15, capacity=15)
+# We use 10 — very conservative. 15 caused 62s FloodWaits.
+# Bot was flagged/violated at 15. Need to stay low to recover trust.
+global_rate_limiter = TokenBucketLimiter(rate=10, capacity=10)

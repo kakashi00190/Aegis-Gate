@@ -838,8 +838,8 @@ async def get_user_duplicate_media(pool: asyncpg.Pool, user_id: int) -> List[asy
                             sm.media_id,
                             m.file_unique_id,
                             m.media_type,
-                            m.anonymous_name,
                             m.file_id,
+                            m.user_id as uploader_id,
                             m.created_at
                         FROM sent_messages sm
                         JOIN media m ON sm.media_id = m.id
@@ -856,13 +856,17 @@ async def get_user_duplicate_media(pool: asyncpg.Pool, user_id: int) -> List[asy
                             MIN(created_at) as first_sent,
                             MAX(created_at) as last_sent,
                             MIN(media_type) as media_type,
-                            MIN(anonymous_name) as anonymous_name
+                            MIN(uploader_id) as uploader_id
                         FROM user_sends
                         GROUP BY file_unique_id
                         HAVING COUNT(*) > 1
                     )
-                    SELECT * FROM dup_groups
-                    ORDER BY count DESC, last_sent DESC
+                    SELECT 
+                        d.*,
+                        u.anonymous_name
+                    FROM dup_groups d
+                    LEFT JOIN users u ON u.id = d.uploader_id
+                    ORDER BY d.count DESC, d.last_sent DESC
                 """, user_id)
     except Exception as e:
         logger.error(f"Error finding duplicates for user {user_id}: {safe_error(e)}")
