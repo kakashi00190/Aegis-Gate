@@ -50,7 +50,28 @@ async def cleanup_command(message: Message, pool: asyncpg.Pool):
     # Find duplicates
     duplicates = await get_user_duplicate_media(pool, user_id)
     
+    # Diagnostic: log what we found
+    logger.info(f"Cleanup scan for user {user_id}: found {len(duplicates)} duplicate groups")
+    
     if not duplicates:
+        # Check if user has ANY sent_messages records
+        try:
+            async with pool.acquire() as conn:
+                total_sent = await conn.fetchval(
+                    "SELECT COUNT(*) FROM sent_messages WHERE recipient_id = $1", user_id
+                )
+                total_unique_files = await conn.fetchval(
+                    "SELECT COUNT(DISTINCT m.file_unique_id) FROM sent_messages sm JOIN media m ON sm.media_id = m.id WHERE sm.recipient_id = $1 AND m.file_unique_id IS NOT NULL",
+                    user_id
+                )
+                null_file_uid = await conn.fetchval(
+                    "SELECT COUNT(*) FROM sent_messages sm JOIN media m ON sm.media_id = m.id WHERE sm.recipient_id = $1 AND m.file_unique_id IS NULL",
+                    user_id
+                )
+                logger.info(f"Cleanup diagnostics for user {user_id}: total_sent={total_sent}, unique_files={total_unique_files}, null_file_unique_id={null_file_uid}")
+        except Exception as e:
+            logger.error(f"Cleanup diagnostic error: {safe_error(e)}")
+        
         await scanning_msg.edit_text(
             "✅ <b>No duplicates found!</b>\n\n"
             "Your chat is clean and organized! 🎉",
