@@ -37,14 +37,14 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
 # --- Anti-violation traffic shaping ---
 # Media-type specific concurrency: heavy media gets fewer parallel sends
 MEDIA_CONCURRENCY = {
-    'photo': 10,
-    'video': 5,
-    'document': 5,
+    'photo': 5,
+    'video': 3,
+    'document': 3,
 }
 SEND_DELAY_BASE = 0.0        # Rate limiter handles all pacing — no extra delay needed
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 50              # Larger chunks = fewer inter-chunk gaps
+CHUNK_SIZE = 20              # Smaller chunks = fewer concurrent in-flight requests
 
 # Broadcast entropy — rotated intro phrases for single-media sends
 # Reduces repetitive message fingerprint detection
