@@ -1079,26 +1079,27 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
                 # First, find IDs of media items that are due
                 # Using SKIP LOCKED to avoid waiting for other workers
                 # Interleave: take oldest items (drain backlog) + newest items (deliver fresh uploads fast)
+                # CTE collects IDs, then main query locks them (UNION + FOR UPDATE not allowed in PG)
                 due_ids = await conn.fetch(
-                    """(
-                       SELECT id, media_group_id FROM media
-                       WHERE scheduled_at <= NOW()
-                         AND sent_at IS NULL
-                         AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')
-                       ORDER BY scheduled_at ASC
-                       LIMIT $1
-                       FOR UPDATE SKIP LOCKED
+                    """WITH due_ids AS (
+                         SELECT id FROM media
+                         WHERE scheduled_at <= NOW()
+                           AND sent_at IS NULL
+                           AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')
+                         ORDER BY scheduled_at ASC
+                         LIMIT $1
+                         UNION
+                         SELECT id FROM media
+                         WHERE scheduled_at <= NOW()
+                           AND sent_at IS NULL
+                           AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')
+                         ORDER BY scheduled_at DESC
+                         LIMIT 10
                        )
-                       UNION
-                       (
-                       SELECT id, media_group_id FROM media
-                       WHERE scheduled_at <= NOW()
-                         AND sent_at IS NULL
-                         AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')
-                       ORDER BY scheduled_at DESC
-                       LIMIT 10
-                       FOR UPDATE SKIP LOCKED
-                       )""",
+                       SELECT m.id, m.media_group_id FROM media m
+                       JOIN due_ids d ON m.id = d.id
+                       ORDER BY m.scheduled_at ASC
+                       FOR UPDATE SKIP LOCKED""",
                     limit
                 )
                 
