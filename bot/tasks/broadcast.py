@@ -208,8 +208,9 @@ async def send_media_to_user(
             wait_time = e.retry_after + random.uniform(1.0, 3.0)
             logger.warning(f"Flood control: User {user_id} or Global limit hit. Waiting {wait_time:.1f}s before retry (attempt {attempt}/{MAX_RETRIES}).")
             await asyncio.sleep(wait_time)
-            # Extra randomized desync jitter after global flood
-            await asyncio.sleep(random.uniform(0.5, 2.5))
+            # Re-acquire rate limiter token before retry — without this,
+            # all post-FloodWait retries fire at once causing another cascade
+            await global_rate_limiter.consume()
             continue
 
         except TelegramForbiddenError as e:

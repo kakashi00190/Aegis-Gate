@@ -64,6 +64,6 @@ class TokenBucketLimiter:
             self.wait_count = 0
 
 # Telegram allows ~30 messages per second to different users
-# We use 25 — aggressive but safe with flood pressure cooldown.
+# We use 20 — safe margin below Telegram's limit. 25 caused 90s FloodWaits.
 # The cooldown prevents the exponential cascade that broke rate=28.
-global_rate_limiter = TokenBucketLimiter(rate=25, capacity=35)
+global_rate_limiter = TokenBucketLimiter(rate=20, capacity=25)
