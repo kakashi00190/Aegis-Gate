@@ -22,9 +22,16 @@ class TokenBucketLimiter:
         return self._slowdown
 
     def apply_flood_pressure(self):
-        """Called when FloodWait/429 is received — dynamically increase slowdown."""
+        """Called when FloodWait/429 is received — dynamically increase slowdown.
+        Cooldown: only increase once per 10s to prevent concurrent FloodWait
+        errors from stacking exponentially (1.3x → 1.69x → 2.2x → 3.71x)."""
+        now = time.monotonic()
+        if now - self._last_flood < 10:
+            # Already applied pressure recently — just update timestamp
+            self._last_flood = now
+            return
         self._slowdown = min(self._slowdown * 1.3, 5.0)
-        self._last_flood = time.monotonic()
+        self._last_flood = now
         logger.warning(f"Dynamic slowdown increased to {self._slowdown:.2f}x due to flood pressure")
 
     def _recover_slowdown(self):
@@ -54,6 +61,6 @@ class TokenBucketLimiter:
             self.tokens -= 1
 
 # Telegram allows ~30 messages per second to different users
-# We use 28 — near the limit for max broadcast throughput.
-# FloodWait handler auto-throttles if Telegram pushes back.
-global_rate_limiter = TokenBucketLimiter(rate=28, capacity=40)
+# We use 20 — safe rate that avoids FloodWait while leaving room
+# for handler responses. 28 caused FloodWait cascades.
+global_rate_limiter = TokenBucketLimiter(rate=20, capacity=30)

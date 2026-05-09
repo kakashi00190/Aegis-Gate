@@ -45,6 +45,7 @@ SEND_DELAY_BASE = 0.05       # Base delay, always jittered (rate limiter does th
 BATCH_SIZE = 10
 MAX_RETRIES = 3
 CHUNK_SIZE = 20
+RECIPIENT_BATCH_SIZE = 50    # Send to 50 users at a time per media item, then next batch
 
 # Broadcast entropy — rotated intro phrases for single-media sends
 # Reduces repetitive message fingerprint detection
@@ -271,7 +272,7 @@ async def _send_with_semaphore(
         return result
 
 
-async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], recipients: list, semaphore: asyncio.Semaphore):
+async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], recipients: list, semaphore: asyncio.Semaphore, mark_sent: bool = True):
     # Use info from the first item
     first_item = media_items[0]
     uploader_id = first_item['user_id']
@@ -334,8 +335,9 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
     type_label = "album" if len(media_items) > 1 else "media"
     
     # Mark as sent in DB now that we've actually delivered (or tried to)
-    m_ids = [item['id'] for item in media_items]
-    await mark_media_sent(pool, m_ids)
+    if mark_sent:
+        m_ids = [item['id'] for item in media_items]
+        await mark_media_sent(pool, m_ids)
     
     logger.info(
         f"Broadcast complete: {type_label} from {uploader_name} -> "
@@ -423,11 +425,40 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                     grouped_media[group_key] = []
                 grouped_media[group_key].append(dict(item))
 
-            # Process broadcast items sequentially — concurrency just causes rate limiter
-            # contention (total throughput is capped at rate limiter regardless)
-            for items in grouped_media.values():
-                await broadcast_item(bot, pool, items, recipients, default_semaphore)
-                await asyncio.sleep(random.uniform(0.3, 1.0))
+            # Process broadcast items with batched recipients
+            # Instead of sending each item to ALL 200+ recipients (20s+ per item),
+            # send to RECIPIENT_BATCH_SIZE at a time across items.
+            # This spreads delivery across items so no single item blocks the queue.
+            total_recipients = len(recipients)
+            if total_recipients <= RECIPIENT_BATCH_SIZE:
+                # Small recipient list — send to all at once
+                for items in grouped_media.values():
+                    await broadcast_item(bot, pool, items, recipients, default_semaphore)
+                    await asyncio.sleep(random.uniform(0.3, 1.0))
+            else:
+                # Batch recipients: item1→batch1, item2→batch1, ..., item1→batch2, ...
+                # First pass: send each item to first batch of recipients
+                media_list = list(grouped_media.values())
+                for batch_start in range(0, total_recipients, RECIPIENT_BATCH_SIZE):
+                    batch_end = min(batch_start + RECIPIENT_BATCH_SIZE, total_recipients)
+                    recipient_batch = recipients[batch_start:batch_end]
+                    is_final_batch = (batch_end >= total_recipients)
+
+                    logger.info(f"Recipient batch {batch_start+1}-{batch_end} of {total_recipients} ({len(media_list)} items)")
+
+                    for items in media_list:
+                        await broadcast_item(bot, pool, items, recipient_batch, default_semaphore, mark_sent=is_final_batch)
+                        await asyncio.sleep(random.uniform(0.3, 1.0))
+
+                    # Mark all items as sent after final batch
+                    if is_final_batch:
+                        for items in media_list:
+                            m_ids = [item['id'] for item in items]
+                            await mark_media_sent(pool, m_ids)
+
+                    # Breathing room between recipient batches
+                    if not is_final_batch:
+                        await asyncio.sleep(random.uniform(1.0, 3.0))
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {safe_error(e)}")
