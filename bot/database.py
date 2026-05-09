@@ -1078,14 +1078,27 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
             async with pool.acquire() as conn:
                 # First, find IDs of media items that are due
                 # Using SKIP LOCKED to avoid waiting for other workers
+                # Interleave: take oldest items (drain backlog) + newest items (deliver fresh uploads fast)
                 due_ids = await conn.fetch(
-                    """SELECT id, media_group_id FROM media
+                    """(
+                       SELECT id, media_group_id FROM media
                        WHERE scheduled_at <= NOW()
                          AND sent_at IS NULL
                          AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')
                        ORDER BY scheduled_at ASC
                        LIMIT $1
-                       FOR UPDATE SKIP LOCKED""",
+                       FOR UPDATE SKIP LOCKED
+                       )
+                       UNION
+                       (
+                       SELECT id, media_group_id FROM media
+                       WHERE scheduled_at <= NOW()
+                         AND sent_at IS NULL
+                         AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')
+                       ORDER BY scheduled_at DESC
+                       LIMIT 10
+                       FOR UPDATE SKIP LOCKED
+                       )""",
                     limit
                 )
                 

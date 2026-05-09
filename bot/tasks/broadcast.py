@@ -37,15 +37,14 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
 # --- Anti-violation traffic shaping ---
 # Media-type specific concurrency: heavy media gets fewer parallel sends
 MEDIA_CONCURRENCY = {
-    'photo': 20,
-    'video': 10,
-    'document': 10,
+    'photo': 10,
+    'video': 5,
+    'document': 5,
 }
 SEND_DELAY_BASE = 0.0        # Rate limiter handles all pacing — no extra delay needed
 BATCH_SIZE = 10
 MAX_RETRIES = 3
 CHUNK_SIZE = 50              # Larger chunks = fewer inter-chunk gaps
-CONCURRENT_BROADCASTS = 3    # Process 3 items simultaneously (rate limiter caps total throughput)
 
 # Broadcast entropy — rotated intro phrases for single-media sends
 # Reduces repetitive message fingerprint detection
@@ -426,18 +425,11 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                     grouped_media[group_key] = []
                 grouped_media[group_key].append(dict(item))
 
-            # Process broadcasts concurrently — rate limiter caps total throughput at 25/sec
-            # regardless of concurrency. Benefit: multiple items progress simultaneously,
-            # one FloodWait doesn't block everything, better resilience.
-            media_groups = list(grouped_media.values())
-            semaphore = asyncio.Semaphore(CONCURRENT_BROADCASTS)
-
-            async def _run_broadcast(items):
-                async with semaphore:
-                    await broadcast_item(bot, pool, items, recipients, default_semaphore)
-
-            tasks = [_run_broadcast(items) for items in media_groups]
-            await asyncio.gather(*tasks)
+            # Process broadcasts sequentially — one at a time.
+            # Concurrent broadcasts cause FloodWait avalanche (3 broadcasts
+            # fight for same 25 tokens/sec = 75 effective rate = instant flood).
+            for items in grouped_media.values():
+                await broadcast_item(bot, pool, items, recipients, default_semaphore)
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {safe_error(e)}")
