@@ -61,6 +61,6 @@ class TokenBucketLimiter:
             self.tokens -= 1
 
 # Telegram allows ~30 messages per second to different users
-# We use 20 — safe rate that avoids FloodWait while leaving room
-# for handler responses. 28 caused FloodWait cascades.
-global_rate_limiter = TokenBucketLimiter(rate=20, capacity=30)
+# We use 25 — aggressive but safe with flood pressure cooldown.
+# The cooldown prevents the exponential cascade that broke rate=28.
+global_rate_limiter = TokenBucketLimiter(rate=25, capacity=35)
