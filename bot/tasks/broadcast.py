@@ -16,7 +16,7 @@ from database import (
 
 logger = logging.getLogger(__name__)
 
-from utils.limiter import global_rate_limiter
+from utils.limiter import global_rate_limiter, ban_wave_detector
 from utils.helpers import safe_error
 
 # Define local batch storer to break circular dependency
@@ -220,6 +220,11 @@ async def send_media_to_user(
             return True
 
         except TelegramRetryAfter as e:
+            # Record FloodWait for ban wave detection
+            if ban_wave_detector.record_floodwait(e.retry_after):
+                # Ban wave just detected - this FloodWait triggered it
+                logger.warning(f"FloodWait {e.retry_after}s triggered ban wave detection")
+            
             # Apply dynamic slowdown to rate limiter
             global_rate_limiter.apply_flood_pressure()
             # Worker desynchronization: randomized recovery prevents all workers resuming at once
@@ -406,6 +411,14 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
 
             if not recipients:
                 await asyncio.sleep(random.uniform(5, 15))
+                continue
+
+            # Check for ban wave and auto-dodge
+            if ban_wave_detector.should_dodge():
+                status = ban_wave_detector.get_status()
+                dodge_time = status['dodge_remaining']
+                logger.warning(f"🛡️ Ban wave dodge active. Pausing broadcasts for {dodge_time:.0f}s")
+                await asyncio.sleep(min(60, dodge_time))  # Check every minute
                 continue
 
             # On first iteration after startup, release stale claims from previous instances

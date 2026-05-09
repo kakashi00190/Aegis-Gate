@@ -5,6 +5,69 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+class BanWaveDetector:
+    """Detects Telegram ban waves from FloodWait patterns and triggers auto-dodge"""
+    
+    def __init__(self):
+        self.floodwait_times = []  # Recent FloodWait timestamps
+        self.floodwait_durations = []  # Recent FloodWait durations
+        self.ban_wave_detected = False
+        self.dodge_until = None  # When dodge period ends
+        self.detection_window = 60  # seconds to analyze
+        self.detection_threshold = 3  # FloodWaits in window to trigger
+        self.high_duration_threshold = 30  # Any FloodWait > 30s is suspicious
+        
+    def record_floodwait(self, duration: float):
+        """Record a FloodWait occurrence and check for ban wave"""
+        now = time.monotonic()
+        self.floodwait_times.append(now)
+        self.floodwait_durations.append(duration)
+        
+        # Keep only recent data
+        cutoff = now - self.detection_window
+        self.floodwait_times = [t for t in self.floodwait_times if t > cutoff]
+        self.floodwait_durations = self.floodwait_durations[-len(self.floodwait_times):]
+        
+        # Check for ban wave patterns
+        recent_count = len(self.floodwait_times)
+        has_long_wait = any(d > self.high_duration_threshold for d in self.floodwait_durations)
+        
+        if recent_count >= self.detection_threshold or has_long_wait:
+            if not self.ban_wave_detected:
+                self.ban_wave_detected = True
+                self.dodge_until = now + random.uniform(300, 600)  # 5-10 min dodge
+                logger.warning(f" BAN WAVE DETECTED! {recent_count} FloodWaits in {self.detection_window}s. Dodging for {self.dodge_until - now:.0f}s")
+                return True
+        return False
+    
+    def should_dodge(self) -> bool:
+        """Check if we should pause broadcasts due to ban wave"""
+        if self.ban_wave_detected and self.dodge_until:
+            if time.monotonic() < self.dodge_until:
+                return True
+            else:
+                # Dodge period over, reset
+                self.ban_wave_detected = False
+                self.dodge_until = None
+                self.floodwait_times = []
+                self.floodwait_durations = []
+                logger.info(" Ban wave subsided. Resuming normal operations.")
+        return False
+    
+    def get_status(self) -> dict:
+        """Get current detector status for monitoring"""
+        now = time.monotonic()
+        recent_count = len([t for t in self.floodwait_times if t > now - self.detection_window])
+        return {
+            'ban_wave_detected': self.ban_wave_detected,
+            'dodge_remaining': max(0, (self.dodge_until or now) - now) if self.dodge_until else 0,
+            'recent_floodwaits': recent_count,
+            'detection_threshold': self.detection_threshold
+        }
+
+# Global ban wave detector
+ban_wave_detector = BanWaveDetector()
+
 class TokenBucketLimiter:
     def __init__(self, rate: int, capacity: int):
         self.rate = rate  # tokens per second
