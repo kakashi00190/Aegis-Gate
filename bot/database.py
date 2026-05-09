@@ -826,161 +826,62 @@ async def get_invite_key(pool: asyncpg.Pool) -> str:
 
 async def get_user_duplicate_media(pool: asyncpg.Pool, user_id: int) -> List[asyncpg.Record]:
     """Find duplicate media sent to a user based on file_unique_id.
-    Works with both tracked (sent_messages) and untracked (media only) media."""
+    Uses sent_messages to find per-user duplicates with message_ids for deletion."""
     try:
-        async with asyncio.timeout(10):
+        async with asyncio.timeout(15):
             async with pool.acquire() as conn:
-                # First check tracked media (sent_messages)
-                tracked_duplicates = await conn.fetch("""
-                    WITH duplicates AS (
+                return await conn.fetch("""
+                    WITH user_sends AS (
                         SELECT 
+                            sm.id as sm_id,
+                            sm.message_id,
+                            sm.media_id,
                             m.file_unique_id,
-                            COUNT(*) as count,
-                            MIN(m.id) as keep_id,
-                            ARRAY_AGG(m.id ORDER BY m.created_at DESC) as all_ids,
-                            MIN(m.created_at) as first_sent,
-                            MAX(m.created_at) as last_sent,
-                            'tracked' as source
+                            m.media_type,
+                            m.anonymous_name,
+                            m.file_id,
+                            m.created_at
                         FROM sent_messages sm
                         JOIN media m ON sm.media_id = m.id
                         WHERE sm.recipient_id = $1
-                        GROUP BY m.file_unique_id
-                        HAVING COUNT(*) > 1
-                    )
-                    SELECT 
-                        d.*,
-                        m.anonymous_name,
-                        m.media_type,
-                        m.file_id
-                    FROM duplicates d
-                    JOIN media m ON m.id = d.keep_id
-                    ORDER BY d.count DESC, d.last_sent DESC
-                """, user_id)
-                
-                # Also check untracked media (media table only - for old pre-tracking media)
-                # This finds duplicates that were sent but not tracked in sent_messages
-                untracked_duplicates = await conn.fetch("""
-                    WITH all_user_media AS (
-                        SELECT DISTINCT
-                            m.file_unique_id,
-                            m.id,
-                            m.anonymous_name,
-                            m.media_type,
-                            m.file_id,
-                            m.created_at
-                        FROM media m
-                        WHERE m.sent_at IS NOT NULL
-                        AND EXISTS (
-                            SELECT 1 FROM users u 
-                            WHERE u.id = $1 AND u.status = 'active'
-                        )
-                        AND NOT EXISTS (
-                            SELECT 1 FROM sent_messages sm 
-                            WHERE sm.recipient_id = $1 AND sm.media_id = m.id
-                        )
+                        AND m.file_unique_id IS NOT NULL
                     ),
-                    duplicates AS (
+                    dup_groups AS (
                         SELECT 
                             file_unique_id,
                             COUNT(*) as count,
-                            MIN(id) as keep_id,
-                            ARRAY_AGG(id ORDER BY created_at DESC) as all_ids,
+                            MIN(sm_id) as keep_sm_id,
+                            ARRAY_AGG(message_id ORDER BY sm_id ASC) as message_ids,
+                            ARRAY_AGG(sm_id ORDER BY sm_id ASC) as sm_ids,
                             MIN(created_at) as first_sent,
                             MAX(created_at) as last_sent,
-                            'untracked' as source
-                        FROM all_user_media
+                            MIN(media_type) as media_type,
+                            MIN(anonymous_name) as anonymous_name
+                        FROM user_sends
                         GROUP BY file_unique_id
                         HAVING COUNT(*) > 1
                     )
-                    SELECT 
-                        d.*,
-                        m.anonymous_name,
-                        m.media_type,
-                        m.file_id
-                    FROM duplicates d
-                    JOIN media m ON m.id = d.keep_id
-                    ORDER BY d.count DESC, d.last_sent DESC
+                    SELECT * FROM dup_groups
+                    ORDER BY count DESC, last_sent DESC
                 """, user_id)
-                
-                # Combine both results
-                all_duplicates = tracked_duplicates + untracked_duplicates
-                
-                # If still no duplicates, do a broader search for any file_unique_id that appears multiple times
-                if not all_duplicates:
-                    broad_duplicates = await conn.fetch("""
-                        WITH all_media AS (
-                            SELECT 
-                                m.file_unique_id,
-                                COUNT(*) as count,
-                                MIN(m.id) as keep_id,
-                                ARRAY_AGG(m.id ORDER BY m.created_at DESC) as all_ids,
-                                MIN(m.created_at) as first_sent,
-                                MAX(m.created_at) as last_sent,
-                                'broad' as source
-                            FROM media m
-                            WHERE m.sent_at IS NOT NULL
-                            GROUP BY m.file_unique_id
-                            HAVING COUNT(*) > 1
-                        )
-                        SELECT 
-                            d.*,
-                            m.anonymous_name,
-                            m.media_type,
-                            m.file_id
-                        FROM all_media d
-                        JOIN media m ON m.id = d.keep_id
-                        ORDER BY d.count DESC, d.last_sent DESC
-                        LIMIT 50
-                    """)
-                    all_duplicates = broad_duplicates
-                
-                return all_duplicates
     except Exception as e:
         logger.error(f"Error finding duplicates for user {user_id}: {safe_error(e)}")
         return []
 
 
-async def delete_user_duplicate_media(pool: asyncpg.Pool, user_id: int, file_unique_ids: List[str]) -> int:
-    """Delete duplicate media entries for a user, keeping only the first one.
-    Works with both tracked (sent_messages) and untracked (media only) media."""
+async def delete_user_duplicate_messages(pool: asyncpg.Pool, user_id: int, message_ids_to_delete: List[int]) -> int:
+    """Delete sent_messages records for duplicate messages.
+    The actual Telegram messages must be deleted separately via bot.delete_message()."""
     try:
         async with asyncio.timeout(30):
             async with pool.acquire() as conn:
-                total_deleted = 0
-                
-                # Delete tracked duplicates from sent_messages
-                tracked_result = await conn.fetch("""
-                    WITH to_delete AS (
-                        SELECT 
-                            sm.message_id,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY m.file_unique_id 
-                                ORDER BY sm.id ASC
-                            ) as rn
-                        FROM sent_messages sm
-                        JOIN media m ON sm.media_id = m.id
-                        WHERE sm.recipient_id = $1
-                        AND m.file_unique_id = ANY($2)
-                    )
-                    SELECT message_id FROM to_delete WHERE rn > 1
-                """, user_id, file_unique_ids)
-                
-                if tracked_result:
-                    tracked_message_ids = [r['message_id'] for r in tracked_result]
-                    tracked_deleted = await conn.execute(
-                        "DELETE FROM sent_messages WHERE recipient_id = $1 AND message_id = ANY($2)",
-                        user_id, tracked_message_ids
-                    )
-                    tracked_count = int(tracked_deleted.split()[-1]) if tracked_deleted else 0
-                    total_deleted += tracked_count
-                
-                # For untracked media, we can't delete from user's chat (only Telegram can)
-                # But we can mark them as "cleaned" in the database to prevent future detection
-                # This is a limitation - we can only clean tracked media from user's chat
-                
-                return total_deleted
+                result = await conn.execute(
+                    "DELETE FROM sent_messages WHERE recipient_id = $1 AND message_id = ANY($2)",
+                    user_id, message_ids_to_delete
+                )
+                return int(result.split()[-1]) if result else 0
     except Exception as e:
-        logger.error(f"Error deleting duplicates for user {user_id}: {safe_error(e)}")
+        logger.error(f"Error deleting sent_messages for user {user_id}: {safe_error(e)}")
         return 0
 
 
