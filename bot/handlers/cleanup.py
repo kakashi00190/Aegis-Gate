@@ -81,7 +81,16 @@ async def cleanup_command(message: Message, pool: asyncpg.Pool):
     
     # Calculate stats
     total_duplicates = sum(d['count'] - 1 for d in duplicates)  # Subtract 1 to keep original
-    total_media = sum(d['count'] for d in duplicates)
+    duplicate_groups = len(duplicates)
+    
+    # Get total sent messages for context
+    try:
+        async with pool.acquire() as conn:
+            total_sent = await conn.fetchval(
+                "SELECT COUNT(*) FROM sent_messages WHERE recipient_id = $1", user_id
+            ) or 0
+    except:
+        total_sent = 0
     
     # Collect message IDs to delete (keep first, delete rest)
     messages_to_delete = []
@@ -94,7 +103,8 @@ async def cleanup_command(message: Message, pool: asyncpg.Pool):
     _cleanup_state[user_id] = {
         'duplicates': duplicates,
         'total_duplicates': total_duplicates,
-        'total_media': total_media,
+        'duplicate_groups': duplicate_groups,
+        'total_sent': total_sent,
         'messages_to_delete': messages_to_delete,
         'message_id': scanning_msg.message_id
     }
@@ -108,14 +118,14 @@ async def cleanup_command(message: Message, pool: asyncpg.Pool):
     
     await scanning_msg.edit_text(
         f"🔍 <b>Duplicate Media Found!</b>\n\n"
-        f"📊 <b>Statistics:</b>\n"
-        f"• {len(duplicates)} files have duplicates\n"
-        f"• {total_media} total media files\n"
-        f"• {total_duplicates} can be safely removed\n\n"
-        f"🎯 <b>What will be deleted:</b>\n"
-        f"• Only duplicate copies\n"
-        f"• Original files kept\n"
-        f"• Nothing important lost\n\n"
+        f"📊 <b>Your Chat Stats:</b>\n"
+        f"• {total_sent} total media in your chat\n"
+        f"• {duplicate_groups} files have duplicate copies\n"
+        f"• {total_duplicates} duplicate messages can be removed\n\n"
+        f"🎯 <b>What will happen:</b>\n"
+        f"• {total_duplicates} duplicate copies deleted from your chat\n"
+        f"• {duplicate_groups} original files kept untouched\n"
+        f"• {total_sent - total_duplicates} media remaining after cleanup\n\n"
         f"⚠️ <b>This action cannot be undone!</b>\n\n"
         f"Proceed with cleanup?",
         parse_mode=ParseMode.HTML,
@@ -221,15 +231,15 @@ async def cleanup_callback(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot
                 pass
         
         # Final success message
-        kept_count = state['total_media'] - deleted_count
+        kept_count = state['total_sent'] - deleted_count
         await progress_msg.edit_text(
             f"🏆 <b>Cleanup Successful!</b>\n\n"
             f"✅ <b>Results:</b>\n"
-            f"• {deleted_count} duplicates deleted from your chat\n"
-            f"• {len(state['duplicates'])} unique files kept\n"
-            f"• {kept_count} total media remaining\n\n"
+            f"• {deleted_count} duplicate messages deleted from your chat\n"
+            f"• {state['duplicate_groups']} original files kept untouched\n"
+            f"• {kept_count} total media remaining in your chat\n\n"
             f"🎉 Your chat is now clean and optimized!\n"
-            f"💎 Original files preserved perfectly",
+            f"💎 No important files were lost",
             parse_mode=ParseMode.HTML
         )
         
