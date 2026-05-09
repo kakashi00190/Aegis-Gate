@@ -218,9 +218,15 @@ async def send_media_to_user(
             return False
 
         except TelegramBadRequest as e:
+            err_str = str(e)
             # MEDIA_FILE_INVALID = file_id expired/invalid — no point retrying for ANY user
-            if 'MEDIA_FILE_INVALID' in str(e):
+            if 'MEDIA_FILE_INVALID' in err_str:
                 raise  # Let broadcast_item handle it (skip entire item)
+            # USER_IS_BLOCKED = user blocked the bot — mark and skip, don't retry
+            if 'USER_IS_BLOCKED' in err_str:
+                logger.info(f"User {user_id} blocked the bot (USER_IS_BLOCKED). Marking as blocked in DB.")
+                await mark_user_blocked(pool, user_id)
+                return False
             logger.error(f"Error sending to {user_id}: {safe_error(e)}")
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(random.uniform(1.5, 4.0))
