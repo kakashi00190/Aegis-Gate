@@ -52,13 +52,16 @@ class TokenBucketLimiter:
                 self.last_update = now
                 if self.tokens < 1:
                     self.wait_count += 1
-                    if self.wait_count % 50 == 0:
-                        logger.warning(f"Rate limiter threshold reached ({self.wait_count} waits). Slowing down requests to stay below {self.rate} req/sec.")
+                    # Log at 50, then every 200 — avoids spam at high throughput
+                    if self.wait_count == 50 or (self.wait_count > 50 and self.wait_count % 200 == 0):
+                        logger.warning(f"Rate limiter pacing ({self.wait_count} waits, slowdown={self._slowdown:.2f}x). Staying below {self.rate} req/sec.")
                     # Apply dynamic slowdown with jitter
                     base_wait = 1 / self.rate
                     wait = base_wait * self._slowdown * random.uniform(0.8, 1.3)
                     await asyncio.sleep(wait)
             self.tokens -= 1
+            # Reset wait counter after successful consume — prevents unbounded growth
+            self.wait_count = 0
 
 # Telegram allows ~30 messages per second to different users
 # We use 25 — aggressive but safe with flood pressure cooldown.

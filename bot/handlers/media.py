@@ -262,7 +262,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
     activation_threshold = int(config.get('activation_threshold', '10'))
     reactivation_threshold = int(config.get('reactivation_threshold', '3'))
     delay = int(config.get('broadcast_delay_seconds', '30'))
-    logger.info(f"Broadcast delay from config: {delay}s (raw: '{config.get('broadcast_delay_seconds', '30')}')")
+    logger.debug(f"Broadcast delay from config: {delay}s (raw: '{config.get('broadcast_delay_seconds', '30')}')")
 
     session_id = session['id']
     media_group_id = message.media_group_id
