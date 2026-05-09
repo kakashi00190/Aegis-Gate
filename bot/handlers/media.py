@@ -99,7 +99,7 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
 async def _deliver_missed_media(bot: Bot, pool: asyncpg.Pool, user_id: int):
     """Deliver media items the user missed while inactive. Runs in background."""
     try:
-        missed = await get_missed_media_for_user(pool, user_id, limit=50)
+        missed = await get_missed_media_for_user(pool, user_id, limit=20)
         if not missed:
             return
         logger.info(f"Delivering {len(missed)} missed media items to reactivated user {user_id}")
@@ -120,6 +120,8 @@ async def _deliver_missed_media(bot: Bot, pool: asyncpg.Pool, user_id: int):
                     await bot.send_video(user_id, file_id, caption=credit)
                 elif media_type == 'document':
                     await bot.send_document(user_id, file_id, caption=credit)
+                # Small delay between missed media sends to avoid burst
+                await asyncio.sleep(_r.uniform(0.3, 0.8))
             except Exception as e:
                 err = str(e).lower()
                 if 'blocked' in err or 'deactivated' in err or 'not found' in err:

@@ -37,9 +37,9 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
 # --- Anti-violation traffic shaping ---
 # Media-type specific concurrency: heavy media gets fewer parallel sends
 MEDIA_CONCURRENCY = {
-    'photo': 5,
-    'video': 3,
-    'document': 3,
+    'photo': 3,
+    'video': 2,
+    'document': 2,
 }
 SEND_DELAY_BASE = 0.0        # Rate limiter handles all pacing — no extra delay needed
 BATCH_SIZE = 10
@@ -444,8 +444,9 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             batched_singles = {}
             for uid, items in singles_by_uploader.items():
                 # Telegram allows max 10 items per send_media_group
-                for i in range(0, len(items), 10):
-                    batch = items[i:i+10]
+                # Use 3 max to avoid burst patterns that trigger FloodWait
+                for i in range(0, len(items), 3):
+                    batch = items[i:i+3]
                     batch_key = f"batch_{uid}_{i}"
                     batched_singles[batch_key] = batch
 

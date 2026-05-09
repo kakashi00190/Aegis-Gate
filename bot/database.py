@@ -656,7 +656,7 @@ async def get_missed_media_for_user(pool: asyncpg.Pool, user_id: int, limit: int
                 return await conn.fetch(
                     """SELECT m.* FROM media m
                        WHERE m.sent_at IS NOT NULL
-                         AND m.session_id = (SELECT id FROM sessions WHERE is_active = TRUE LIMIT 1)
+                         AND m.session_id = (SELECT id FROM sessions ORDER BY id DESC LIMIT 1)
                          AND m.user_id != $1
                          AND NOT EXISTS (
                            SELECT 1 FROM sent_messages sm
