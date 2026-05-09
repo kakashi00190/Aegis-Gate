@@ -110,7 +110,10 @@ async def _deliver_missed_media(bot: Bot, pool: asyncpg.Pool, user_id: int):
                 media_type = item.get('media_type', 'photo')
                 file_id = item['file_id']
                 uploader_name = item.get('anonymous_name', '?')
-                credit = f"📸 {uploader_name}" if uploader_name and uploader_name != '?' else None
+                import random as _r
+                from tasks.broadcast import _ENTROPY_PHRASES
+                emoji = _r.choice(_ENTROPY_PHRASES)
+                credit = f"{emoji} {uploader_name}" if uploader_name and uploader_name != '?' else None
                 if media_type == 'photo':
                     await bot.send_photo(user_id, file_id, caption=credit)
                 elif media_type == 'video':

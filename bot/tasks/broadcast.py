@@ -145,8 +145,9 @@ async def send_media_to_user(
             logger.debug(f"Duplicate send skipped: user={user_id} media={item['id']}")
             return True  # treat as success to avoid retry
 
-    # Build uploader credit caption
-    credit = f"📸 {uploader_name}" if uploader_name and uploader_name != '?' else None
+    # Build uploader credit caption — random emoji per send to avoid repetitive patterns
+    emoji = random.choice(_ENTROPY_PHRASES)
+    credit = f"{emoji} {uploader_name}" if uploader_name and uploader_name != '?' else None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -425,6 +426,30 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 if group_key not in grouped_media:
                     grouped_media[group_key] = []
                 grouped_media[group_key].append(dict(item))
+
+            # Batch single items from the same uploader into groups of up to 10
+            # This makes single items as fast as albums — 1 broadcast cycle vs N
+            singles_by_uploader = {}
+            album_groups = {}
+            for key, items in grouped_media.items():
+                if key.startswith('single_') and len(items) == 1:
+                    uid = items[0]['user_id']
+                    if uid not in singles_by_uploader:
+                        singles_by_uploader[uid] = []
+                    singles_by_uploader[uid].append(items[0])
+                else:
+                    album_groups[key] = items
+
+            # Merge batched singles back into grouped_media
+            batched_singles = {}
+            for uid, items in singles_by_uploader.items():
+                # Telegram allows max 10 items per send_media_group
+                for i in range(0, len(items), 10):
+                    batch = items[i:i+10]
+                    batch_key = f"batch_{uid}_{i}"
+                    batched_singles[batch_key] = batch
+
+            grouped_media = {**album_groups, **batched_singles}
 
             # Process broadcasts sequentially — one at a time.
             # Concurrent broadcasts cause FloodWait avalanche (3 broadcasts
