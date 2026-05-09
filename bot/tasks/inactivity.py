@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 async def check_inactivity(bot: Bot, pool: asyncpg.Pool):
     while True:
         health_monitor.update("inactivity_check")
-        # Run every 15 minutes instead of every 1 minute for Nano
-        await asyncio.sleep(900) 
         try:
             paused, _ = await is_session_paused(pool)
             if paused:
@@ -48,3 +46,6 @@ async def check_inactivity(bot: Bot, pool: asyncpg.Pool):
 
         except Exception as e:
             logger.error(f"Inactivity check error: {safe_error(e)}")
+
+        # Run every 15 minutes (sleep at end so first check runs immediately on startup)
+        await asyncio.sleep(900)
