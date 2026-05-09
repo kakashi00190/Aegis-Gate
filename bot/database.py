@@ -647,6 +647,30 @@ async def activate_user(pool: asyncpg.Pool, user_id: int) -> bool:
         invalidate_stats_cache()
 
 
+async def get_missed_media_for_user(pool: asyncpg.Pool, user_id: int, limit: int = 50) -> List[asyncpg.Record]:
+    """Find media items that were broadcast while user was inactive.
+    Returns media items the user hasn't received, ordered oldest first."""
+    try:
+        async with asyncio.timeout(15):
+            async with pool.acquire() as conn:
+                return await conn.fetch(
+                    """SELECT m.* FROM media m
+                       WHERE m.sent_at IS NOT NULL
+                         AND m.session_id = (SELECT id FROM sessions WHERE is_active = TRUE LIMIT 1)
+                         AND m.user_id != $1
+                         AND NOT EXISTS (
+                           SELECT 1 FROM sent_messages sm
+                           WHERE sm.media_id = m.id AND sm.recipient_id = $1
+                         )
+                       ORDER BY m.sent_at ASC
+                       LIMIT $2""",
+                    user_id, limit
+                )
+    except Exception as e:
+        logger.error(f"Error finding missed media for user {user_id}: {safe_error(e)}")
+        return []
+
+
 async def reactivate_user(pool: asyncpg.Pool, user_id: int) -> bool:
     try:
         async with asyncio.timeout(10):

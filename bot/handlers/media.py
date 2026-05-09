@@ -10,7 +10,7 @@ from database import (
     get_user, get_config, get_current_session, is_session_paused,
     add_media, update_user_on_upload, activate_user, reactivate_user,
     increment_inactive_uploads, get_upload_context,
-    get_referral_count
+    get_referral_count, get_missed_media_for_user
 )
 from utils.helpers import contains_link, format_timedelta_until, safe_error
 from utils.levels import referral_badge_for_count, referral_exp_bonus, REFERRAL_BADGES
@@ -94,6 +94,39 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
                     pass
     except Exception as e:
         logger.error(f"Error awarding referral bonus for {newly_active_user_id}: {safe_error(e)}")
+
+
+async def _deliver_missed_media(bot: Bot, pool: asyncpg.Pool, user_id: int):
+    """Deliver media items the user missed while inactive. Runs in background."""
+    try:
+        missed = await get_missed_media_for_user(pool, user_id, limit=50)
+        if not missed:
+            return
+        logger.info(f"Delivering {len(missed)} missed media items to reactivated user {user_id}")
+        from utils.limiter import global_rate_limiter
+        for item in missed:
+            try:
+                await global_rate_limiter.consume()
+                media_type = item.get('media_type', 'photo')
+                file_id = item['file_id']
+                uploader_name = item.get('anonymous_name', '?')
+                credit = f"📸 {uploader_name}" if uploader_name and uploader_name != '?' else None
+                if media_type == 'photo':
+                    await bot.send_photo(user_id, file_id, caption=credit)
+                elif media_type == 'video':
+                    await bot.send_video(user_id, file_id, caption=credit)
+                elif media_type == 'document':
+                    await bot.send_document(user_id, file_id, caption=credit)
+            except Exception as e:
+                err = str(e).lower()
+                if 'blocked' in err or 'deactivated' in err or 'not found' in err:
+                    logger.info(f"User {user_id} unavailable during missed media delivery. Stopping.")
+                    return
+                # Skip this item, continue with next
+                logger.debug(f"Skipping missed media {item['id']} for user {user_id}: {safe_error(e)}")
+        logger.info(f"Finished delivering missed media to user {user_id}")
+    except Exception as e:
+        logger.error(f"Error delivering missed media to {user_id}: {safe_error(e)}")
 
 
 async def _safe_answer(message: Message, text: str, **kwargs):
@@ -319,6 +352,8 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         if count >= reactivation_threshold:
             reactivated = await reactivate_user(pool, user_id)
             if reactivated:
+                # Deliver missed media in background — user gets what they missed while inactive
+                asyncio.create_task(_deliver_missed_media(bot, pool, user_id))
                 await _safe_answer(message,
                     "✅ <b>You have been reactivated!</b>\n\n"
                     "You will receive media from other users again.\n"
