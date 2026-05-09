@@ -556,8 +556,8 @@ async def add_media(
                         last_scheduled = last_scheduled.replace(tzinfo=timezone.utc)
                     
                     # If the last item is scheduled far in the future, keep staggering
-                    # We add 0.5 seconds between items from the same user to prevent flooding
-                    scheduled_at = max(base_time, last_scheduled + timedelta(milliseconds=500))
+                    # We add 50ms between items from the same user — just enough to order them
+                    scheduled_at = max(base_time, last_scheduled + timedelta(milliseconds=50))
                 else:
                     scheduled_at = base_time
 

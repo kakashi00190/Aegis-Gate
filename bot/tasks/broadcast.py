@@ -401,8 +401,9 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 except Exception as e:
                     logger.error(f"Startup unclaim error: {safe_error(e)}")
 
-            # Claim up to 200 items per cycle to keep queue moving
-            raw_items = await claim_due_broadcasts(pool, limit=200)
+            # Claim 30 items per cycle — smaller batches mean faster loops,
+            # so new uploads get picked up within seconds of becoming eligible
+            raw_items = await claim_due_broadcasts(pool, limit=30)
             if not raw_items:
                 # Periodic status log even if no items
                 now = time.monotonic()
