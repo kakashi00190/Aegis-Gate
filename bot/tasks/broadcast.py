@@ -48,21 +48,38 @@ CHUNK_SIZE = 20              # Smaller chunks = fewer concurrent in-flight reque
 MAX_RECIPIENTS_PER_ITEM = 80 # Anti-detection: limit recipients so not every media goes to all users
 
 # Broadcast entropy — varied caption formats to break fingerprint detection
-# Different patterns: emoji+name, name only, decorative, subtle
+# Different patterns: emoji+name, name only, decorative, subtle, expressive
 _ENTROPY_PHRASES = [
     "🔥", "⚡", "📢", "✨", "🎬", "📸", "🎥", "🌟",
     "💫", "🎯", "🪄", "🌙", "🦊", "🐺", "🦅", "🐉",
+    "💎", "🎪", "🦋", "🌺", "🍀", "🫧", "🧊", "🪩",
+    "🪬", "🝔", "⛧", "⛧", "🜏", "☽", "⚝", "✵",
+    "🜿", "◈", "⍟", "⊛", "⎈", "⏣", "⎔", "⍙",
 ]
 
 # Caption format templates — randomly selected per send
-# This prevents all messages having identical "emoji name" structure
+# This prevents all messages having identical structure
 _CAPTION_FORMATS = [
-    "{emoji} {name}",          # 🔥 UserName
-    "{name}",                   # UserName (no emoji)
-    "by {name}",               # by UserName
-    "{emoji} {name} {emoji2}", # 🔥 UserName ⚡
-    "— {name}",                # — UserName
-    "{name} ✦",                # UserName ✦
+    "{emoji} {name}",              # 🔥 UserName
+    "{name}",                       # UserName (no emoji)
+    "by {name}",                    # by UserName
+    "{emoji} {name} {emoji2}",     # 🔥 UserName ⚡
+    "— {name}",                     # — UserName
+    "{name} ✦",                     # UserName ✦
+    "📸 by {name}",                 # 📸 by UserName
+    "{emoji2} {name} {emoji}",     # ⚡ UserName 🔥 (reversed)
+    "~ {name} ~",                   # ~ UserName ~
+    "{name} {emoji2}",              # UserName 🌙
+    "via {name}",                   # via UserName
+    "✧ {name} ✧",                   # ✧ UserName ✧
+    "{emoji} {emoji2} {name}",     # 🔥 ⚡ UserName
+    "{name} · {emoji}",            # UserName · 🔥
+    "from {name}",                  # from UserName
+    "⟡ {name}",                     # ⟡ UserName
+    "{emoji} {name}'s",            # 🔥 UserName's
+    "「{name}」",                    # 「UserName」
+    "{name} ⊹ {emoji2}",           # UserName ⊹ 🌟
+    "⌇ {name} {emoji}",            # ⌇ UserName 🔥
 ]
 
 # Duplicate send protection: tracks (user_id, media_id) recently sent

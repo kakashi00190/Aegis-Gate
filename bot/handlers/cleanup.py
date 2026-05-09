@@ -178,6 +178,7 @@ async def cleanup_callback(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot
         deleted_count = 0
         failed_count = 0
         batch_size = 5
+        logger.info(f"Cleanup: starting deletion of {total_to_delete} duplicate messages for user {user_id}")
         
         for i in range(0, total_to_delete, batch_size):
             batch = messages_to_delete[i:i + batch_size]
@@ -201,6 +202,7 @@ async def cleanup_callback(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot
             
             # Update progress every batch
             processed = min(i + batch_size, total_to_delete)
+            logger.info(f"Cleanup progress for user {user_id}: {deleted_count}/{total_to_delete} deleted, {failed_count} failed")
             try:
                 await progress_msg.edit_text(
                     f"🗑️ <b>Deleting duplicates...</b>\n\n"
@@ -213,7 +215,10 @@ async def cleanup_callback(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot
         
         # Now clean up the sent_messages records
         if messages_to_delete:
-            await delete_user_duplicate_messages(pool, user_id, messages_to_delete)
+            db_deleted = await delete_user_duplicate_messages(pool, user_id, messages_to_delete)
+            logger.info(f"Cleanup DB: removed {db_deleted} sent_messages records for user {user_id}")
+        
+        logger.info(f"Cleanup complete for user {user_id}: {deleted_count} Telegram messages deleted, {failed_count} failed, {db_deleted} DB records cleaned")
         
         # Show success animation
         success_frames = ["✨", "🎉", "🏆", "💎"]
