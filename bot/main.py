@@ -17,7 +17,7 @@ from aiogram.types import CallbackQuery
 import config
 from validate_env import main as validate_environment
 from database import init_db
-from handlers import start, media, commands, admin
+from handlers import start, media, commands, admin, cleanup
 from tasks.broadcast import process_broadcast_queue, sent_messages_logger_task
 from tasks.inactivity import check_inactivity
 from utils.helpers import safe_error
@@ -236,6 +236,7 @@ async def main():
     dp.include_router(media.router)
     dp.include_router(commands.router)
     dp.include_router(admin.router)
+    dp.include_router(cleanup.router)
 
     loop = asyncio.get_running_loop()
     loop.create_task(process_broadcast_queue(bot, pool))

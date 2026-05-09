@@ -824,6 +824,78 @@ async def get_invite_key(pool: asyncpg.Pool) -> str:
         return "aegis2026"
 
 
+async def get_user_duplicate_media(pool: asyncpg.Pool, user_id: int) -> List[asyncpg.Record]:
+    """Find duplicate media sent to a user based on file_unique_id"""
+    try:
+        async with asyncio.timeout(10):
+            async with pool.acquire() as conn:
+                return await conn.fetch("""
+                    WITH duplicates AS (
+                        SELECT 
+                            m.file_unique_id,
+                            COUNT(*) as count,
+                            MIN(m.id) as keep_id,
+                            ARRAY_AGG(m.id ORDER BY m.created_at DESC) as all_ids,
+                            MIN(m.created_at) as first_sent,
+                            MAX(m.created_at) as last_sent
+                        FROM sent_messages sm
+                        JOIN media m ON sm.media_id = m.id
+                        WHERE sm.recipient_id = $1
+                        GROUP BY m.file_unique_id
+                        HAVING COUNT(*) > 1
+                    )
+                    SELECT 
+                        d.*,
+                        m.anonymous_name,
+                        m.media_type,
+                        m.file_id
+                    FROM duplicates d
+                    JOIN media m ON m.id = d.keep_id
+                    ORDER BY d.count DESC, d.last_sent DESC
+                """, user_id)
+    except Exception as e:
+        logger.error(f"Error finding duplicates for user {user_id}: {safe_error(e)}")
+        return []
+
+
+async def delete_user_duplicate_media(pool: asyncpg.Pool, user_id: int, file_unique_ids: List[str]) -> int:
+    """Delete duplicate sent_messages entries for a user, keeping only the first one"""
+    try:
+        async with asyncio.timeout(30):
+            async with pool.acquire() as conn:
+                # Get message IDs to delete (keep only the first per file_unique_id)
+                result = await conn.fetch("""
+                    WITH to_delete AS (
+                        SELECT 
+                            sm.message_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY m.file_unique_id 
+                                ORDER BY sm.id ASC
+                            ) as rn
+                        FROM sent_messages sm
+                        JOIN media m ON sm.media_id = m.id
+                        WHERE sm.recipient_id = $1
+                        AND m.file_unique_id = ANY($2)
+                    )
+                    SELECT message_id FROM to_delete WHERE rn > 1
+                """, user_id, file_unique_ids)
+                
+                message_ids = [r['message_id'] for r in result]
+                if not message_ids:
+                    return 0
+                
+                # Delete the duplicate sent_messages entries
+                deleted = await conn.execute(
+                    "DELETE FROM sent_messages WHERE recipient_id = $1 AND message_id = ANY($2)",
+                    user_id, message_ids
+                )
+                
+                return deleted.split()[-1] if deleted else 0
+    except Exception as e:
+        logger.error(f"Error deleting duplicates for user {user_id}: {safe_error(e)}")
+        return 0
+
+
 async def set_invite_key(pool: asyncpg.Pool, new_key: str) -> bool:
     try:
         async with asyncio.timeout(10):
