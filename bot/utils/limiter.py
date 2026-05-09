@@ -5,9 +5,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Admin ID for ban wave notifications
-ADMIN_ID = 8671192757
-
 class BanWaveDetector:
     """Detects Telegram ban waves from FloodWait patterns and triggers auto-dodge"""
     
@@ -19,17 +16,23 @@ class BanWaveDetector:
         self.detection_window = 60  # seconds to analyze
         self.detection_threshold = 3  # FloodWaits in window to trigger
         self.high_duration_threshold = 30  # Any FloodWait > 30s is suspicious
-        
+        self._bot = None  # Bot instance for notifications (set at startup)
+    
+    def set_bot(self, bot):
+        """Set the bot instance for admin notifications"""
+        self._bot = bot
+    
     def record_floodwait(self, duration: float):
         """Record a FloodWait occurrence and check for ban wave"""
         now = time.monotonic()
         self.floodwait_times.append(now)
         self.floodwait_durations.append(duration)
         
-        # Keep only recent data
+        # Keep only recent data (prune both lists together)
         cutoff = now - self.detection_window
-        self.floodwait_times = [t for t in self.floodwait_times if t > cutoff]
-        self.floodwait_durations = self.floodwait_durations[-len(self.floodwait_times):]
+        recent_indices = [i for i, t in enumerate(self.floodwait_times) if t > cutoff]
+        self.floodwait_times = [self.floodwait_times[i] for i in recent_indices]
+        self.floodwait_durations = [self.floodwait_durations[i] for i in recent_indices]
         
         # Check for ban wave patterns
         recent_count = len(self.floodwait_times)
@@ -42,7 +45,7 @@ class BanWaveDetector:
                 dodge_duration = self.dodge_until - now
                 
                 # Log to system
-                logger.warning(f" BAN WAVE DETECTED! {recent_count} FloodWaits in {self.detection_window}s. Dodging for {dodge_duration:.0f}s")
+                logger.warning(f"🛡️ BAN WAVE DETECTED! {recent_count} FloodWaits in {self.detection_window}s. Dodging for {dodge_duration:.0f}s")
                 
                 # Schedule admin notification (async, don't block)
                 asyncio.create_task(self._notify_admin_ban_wave(recent_count, dodge_duration))
@@ -52,23 +55,28 @@ class BanWaveDetector:
     async def _notify_admin_ban_wave(self, flood_count: int, dodge_duration: float):
         """Send admin-only notification about ban wave detection"""
         try:
-            # Import here to avoid circular imports
-            from aiogram import Bot
-            from config import BOT_TOKEN
+            from config import ADMIN_IDS
             
-            bot = Bot(token=BOT_TOKEN)
-            await bot.send_message(
-                ADMIN_ID,
-                f"🚨 <b>BAN WAVE DETECTED</b>\n\n"
-                f"• {flood_count} FloodWaits in 60s\n"
-                f"• Auto-dodge activated\n"
-                f"• Pausing broadcasts for {dodge_duration:.0f}s\n"
-                f"• Bot will resume automatically\n\n"
-                f"This prevents potential ban. Monitor logs.",
-                parse_mode="HTML"
-            )
+            if not self._bot:
+                logger.error("BanWaveDetector: no bot instance set for notifications")
+                return
+            
+            for admin_id in ADMIN_IDS:
+                try:
+                    await self._bot.send_message(
+                        admin_id,
+                        f"🚨 <b>BAN WAVE DETECTED</b>\n\n"
+                        f"• {flood_count} FloodWaits in 60s\n"
+                        f"• Auto-dodge activated\n"
+                        f"• Pausing broadcasts for {dodge_duration:.0f}s (~{dodge_duration/60:.1f}min)\n"
+                        f"• Bot will resume automatically\n\n"
+                        f"This prevents potential ban. Monitor logs.",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to notify admin {admin_id}: {e}")
         except Exception as e:
-            logger.error(f"Failed to notify admin about ban wave: {e}")
+            logger.error(f"Failed to notify admins about ban wave: {e}")
     
     def should_dodge(self) -> bool:
         """Check if we should pause broadcasts due to ban wave"""
@@ -81,7 +89,7 @@ class BanWaveDetector:
                 self.dodge_until = None
                 self.floodwait_times = []
                 self.floodwait_durations = []
-                logger.info(" Ban wave subsided. Resuming normal operations.")
+                logger.info("🛡️ Ban wave subsided. Resuming normal operations.")
                 
                 # Notify admin that ban wave is over
                 asyncio.create_task(self._notify_admin_recovery())
@@ -90,22 +98,27 @@ class BanWaveDetector:
     async def _notify_admin_recovery(self):
         """Send admin-only notification when ban wave subsides"""
         try:
-            # Import here to avoid circular imports
-            from aiogram import Bot
-            from config import BOT_TOKEN
+            from config import ADMIN_IDS
             
-            bot = Bot(token=BOT_TOKEN)
-            await bot.send_message(
-                ADMIN_ID,
-                f"✅ <b>BAN WAVE SUBSIDED</b>\n\n"
-                f"• Auto-dodge completed\n"
-                f"• Resuming normal broadcasts\n"
-                f"• Monitoring for new patterns\n\n"
-                f"Bot is operating normally again.",
-                parse_mode="HTML"
-            )
+            if not self._bot:
+                logger.error("BanWaveDetector: no bot instance set for notifications")
+                return
+            
+            for admin_id in ADMIN_IDS:
+                try:
+                    await self._bot.send_message(
+                        admin_id,
+                        f"✅ <b>BAN WAVE SUBSIDED</b>\n\n"
+                        f"• Auto-dodge completed\n"
+                        f"• Resuming normal broadcasts\n"
+                        f"• Monitoring for new patterns\n\n"
+                        f"Bot is operating normally again.",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to notify admin {admin_id} about recovery: {e}")
         except Exception as e:
-            logger.error(f"Failed to notify admin about recovery: {e}")
+            logger.error(f"Failed to notify admins about recovery: {e}")
     
     def get_status(self) -> dict:
         """Get current detector status for monitoring"""

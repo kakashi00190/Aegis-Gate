@@ -228,6 +228,8 @@ async def main():
         exception = event.exception
         if isinstance(exception, TelegramRetryAfter):
             logger.warning(f"Global flood control caught: retry after {exception.retry_after}s. Ignoring.")
+            # Record for ban wave detection even if caught globally
+            ban_wave_detector.record_floodwait(exception.retry_after)
             return True
         logger.error(f"Unhandled error in dispatcher: {safe_error(exception)}")
         return True
@@ -237,6 +239,10 @@ async def main():
     dp.include_router(commands.router)
     dp.include_router(admin.router)
     dp.include_router(cleanup.router)
+
+    # Wire bot instance to ban wave detector for admin notifications
+    from utils.limiter import ban_wave_detector
+    ban_wave_detector.set_bot(bot)
 
     loop = asyncio.get_running_loop()
     loop.create_task(process_broadcast_queue(bot, pool))
