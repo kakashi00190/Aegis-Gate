@@ -4,7 +4,7 @@ import time
 import random
 from typing import List
 from aiogram import Bot
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 import asyncpg
 # Removed circular import of store_sent_messages_batch
@@ -217,6 +217,16 @@ async def send_media_to_user(
             await mark_user_blocked(pool, user_id)
             return False
 
+        except TelegramBadRequest as e:
+            # MEDIA_FILE_INVALID = file_id expired/invalid — no point retrying for ANY user
+            if 'MEDIA_FILE_INVALID' in str(e):
+                raise  # Let broadcast_item handle it (skip entire item)
+            logger.error(f"Error sending to {user_id}: {safe_error(e)}")
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(random.uniform(1.5, 4.0))
+            else:
+                return False
+
         except Exception as e:
             err = str(e).lower()
             # Only mark as blocked for very specific Telegram errors that mean the chat is gone
@@ -295,8 +305,17 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        # Check for MEDIA_FILE_INVALID — expired file_id, skip entire item
+        if any(isinstance(r, TelegramBadRequest) and 'MEDIA_FILE_INVALID' in str(r) for r in results):
+            m_ids = [item['id'] for item in media_items]
+            await mark_media_sent(pool, m_ids)
+            logger.warning(f"Skipping media from {uploader_name}: MEDIA_FILE_INVALID (expired file_id). Marked {len(m_ids)} item(s) as sent.")
+            return
+
         for r in results:
-            if r is True:
+            if isinstance(r, Exception):
+                fail_count += 1
+            elif r is True:
                 sent_count += 1
             else:
                 fail_count += 1
