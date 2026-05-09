@@ -464,8 +464,10 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
 
     # Handle referral tracking (store referred_by only — EXP awarded at activation)
     if referral_code_from_link:
+        logger.info(f"Processing referral: user={message.from_user.id}, code={referral_code_from_link}")
         referrer = await get_user_by_referral_code(pool, referral_code_from_link)
         if referrer and referrer['id'] != message.from_user.id:
+            logger.info(f"Valid referral: assigning user {message.from_user.id} to referrer {referrer['id']}")
             await set_referred_by(pool, message.from_user.id, referrer['id'])
             # Notify referrer that someone signed up via their link
             try:
@@ -478,6 +480,10 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
                 )
             except Exception:
                 pass
+        else:
+            logger.warning(f"Invalid referral code: {referral_code_from_link} (referrer not found or self-referral)")
+    else:
+        logger.info(f"User {message.from_user.id} joined without referral code")
 
     # Final animation frame
     await anim1.edit_text("✅ <b>Account Activated!</b>", parse_mode="HTML")

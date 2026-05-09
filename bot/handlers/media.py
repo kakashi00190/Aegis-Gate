@@ -24,15 +24,22 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
     """Award EXP and badge to referrer when their referral activates."""
     try:
         user = await get_user(pool, newly_active_user_id)
-        if not user or not user.get('referred_by'):
+        if not user:
+            logger.info(f"Referral award: user {newly_active_user_id} not found")
+            return
+        if not user.get('referred_by'):
+            logger.info(f"Referral award: user {newly_active_user_id} has no referrer")
             return
         # Already awarded? Skip
         if user.get('referral_awarded'):
+            logger.info(f"Referral award: user {newly_active_user_id} already awarded")
             return
         referrer_id = user['referred_by']
+        logger.info(f"Referral award: processing for user {newly_active_user_id} -> referrer {referrer_id}")
 
         referrer = await get_user(pool, referrer_id)
         if not referrer:
+            logger.error(f"Referral award: referrer {referrer_id} not found")
             return
 
         bonus = referral_exp_bonus(referrer['level'])
@@ -46,8 +53,10 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
                 "UPDATE users SET exp = exp + $2 WHERE id = $1",
                 referrer_id, bonus
             )
+            logger.info(f"Referral award: gave {bonus} EXP to referrer {referrer_id}")
             # Check for referral badge upgrade
             ref_count = await get_referral_count(pool, referrer_id)
+            logger.info(f"Referral award: referrer {referrer_id} now has {ref_count} referrals")
             badge_info = referral_badge_for_count(ref_count)
             if badge_info:
                 emoji, title = badge_info
