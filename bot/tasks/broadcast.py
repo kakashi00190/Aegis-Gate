@@ -45,11 +45,24 @@ SEND_DELAY_BASE = 0.0        # Rate limiter handles all pacing — no extra dela
 BATCH_SIZE = 10
 MAX_RETRIES = 3
 CHUNK_SIZE = 20              # Smaller chunks = fewer concurrent in-flight requests
+MAX_RECIPIENTS_PER_ITEM = 80 # Anti-detection: limit recipients so not every media goes to all users
 
-# Broadcast entropy — rotated intro phrases for single-media sends
-# Reduces repetitive message fingerprint detection
+# Broadcast entropy — varied caption formats to break fingerprint detection
+# Different patterns: emoji+name, name only, decorative, subtle
 _ENTROPY_PHRASES = [
     "🔥", "⚡", "📢", "✨", "🎬", "📸", "🎥", "🌟",
+    "💫", "🎯", "🪄", "🌙", "🦊", "🐺", "🦅", "🐉",
+]
+
+# Caption format templates — randomly selected per send
+# This prevents all messages having identical "emoji name" structure
+_CAPTION_FORMATS = [
+    "{emoji} {name}",          # 🔥 UserName
+    "{name}",                   # UserName (no emoji)
+    "by {name}",               # by UserName
+    "{emoji} {name} {emoji2}", # 🔥 UserName ⚡
+    "— {name}",                # — UserName
+    "{name} ✦",                # UserName ✦
 ]
 
 # Duplicate send protection: tracks (user_id, media_id) recently sent
@@ -145,9 +158,14 @@ async def send_media_to_user(
             logger.debug(f"Duplicate send skipped: user={user_id} media={item['id']}")
             return True  # treat as success to avoid retry
 
-    # Build uploader credit caption — random emoji per send to avoid repetitive patterns
-    emoji = random.choice(_ENTROPY_PHRASES)
-    credit = f"{emoji} {uploader_name}" if uploader_name and uploader_name != '?' else None
+    # Build uploader credit caption — varied format per send to avoid repetitive patterns
+    if uploader_name and uploader_name != '?':
+        fmt = random.choice(_CAPTION_FORMATS)
+        emoji = random.choice(_ENTROPY_PHRASES)
+        emoji2 = random.choice(_ENTROPY_PHRASES)
+        credit = fmt.format(emoji=emoji, emoji2=emoji2, name=uploader_name)
+    else:
+        credit = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -178,16 +196,15 @@ async def send_media_to_user(
                         _sent_messages_queue.put_nowait((user_id, msg.message_id, session_id, m_id))
                 return True
 
-            # Single media item — add uploader name + entropy caption
+            # Single media item — use the varied credit format
             item = media_items[0]
             media_type = item['media_type']
             file_id = item['file_id']
             media_id = item['id']
             msg = None
 
-            # Combine uploader credit with entropy emoji for anti-fingerprint
-            entropy = random.choice(_ENTROPY_PHRASES)
-            caption = f"{credit} {entropy}" if credit else entropy
+            # Use the already-formatted credit (varied per send)
+            caption = credit
 
             if media_type == 'photo':
                 msg = await bot.send_photo(user_id, file_id, caption=caption)
@@ -291,6 +308,13 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
         await unclaim_broadcast(pool, m_ids)
         return
 
+    # Anti-detection: limit recipients per item so not every media goes to ALL users
+    # This breaks the pattern of identical recipient lists across all broadcasts
+    if total_targets > MAX_RECIPIENTS_PER_ITEM:
+        random.shuffle(target_users)
+        target_users = target_users[:MAX_RECIPIENTS_PER_ITEM]
+        total_targets = len(target_users)
+
     # Shuffle recipients for organic delivery order — prevents identical send patterns
     random.shuffle(target_users)
 
@@ -388,6 +412,21 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             # This must happen BEFORE the first claim so items are available
             if not hasattr(process_broadcast_queue, '_startup_unclaim_done'):
                 setattr(process_broadcast_queue, '_startup_unclaim_done', True)
+                # Warmup: gradually ramp up rate limiter over 60s to avoid cold-start burst
+                # Telegram detects bots that start at full speed immediately after restart
+                original_rate = global_rate_limiter.rate
+                global_rate_limiter.rate = 3
+                global_rate_limiter.tokens = min(global_rate_limiter.tokens, 3)
+                logger.info(f"Warmup: starting at 3 msg/sec, ramping to {original_rate} over 60s")
+                # Schedule gradual ramp-up in background
+                async def _warmup_ramp():
+                    steps = [(5, 15), (7, 30), (9, 45), (original_rate, 60)]
+                    for target_rate, delay_s in steps:
+                        await asyncio.sleep(delay_s)
+                        global_rate_limiter.rate = target_rate
+                        logger.info(f"Warmup: rate increased to {target_rate} msg/sec")
+                asyncio.create_task(_warmup_ramp())
+
                 try:
                     async with pool.acquire() as conn:
                         released = await conn.fetchval(
@@ -457,6 +496,8 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             # fight for same 25 tokens/sec = 75 effective rate = instant flood).
             for items in grouped_media.values():
                 await broadcast_item(bot, pool, items, recipients, default_semaphore)
+                # Anti-detection: random delay between items breaks rapid-fire pattern
+                await asyncio.sleep(random.uniform(5, 15))
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {safe_error(e)}")
