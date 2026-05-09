@@ -412,15 +412,15 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             # This must happen BEFORE the first claim so items are available
             if not hasattr(process_broadcast_queue, '_startup_unclaim_done'):
                 setattr(process_broadcast_queue, '_startup_unclaim_done', True)
-                # Warmup: gradually ramp up rate limiter over 60s to avoid cold-start burst
+                # Warmup: gradually ramp up rate limiter over 15s to avoid cold-start burst
                 # Telegram detects bots that start at full speed immediately after restart
                 original_rate = global_rate_limiter.rate
                 global_rate_limiter.rate = 3
                 global_rate_limiter.tokens = min(global_rate_limiter.tokens, 3)
-                logger.info(f"Warmup: starting at 3 msg/sec, ramping to {original_rate} over 60s")
+                logger.info(f"Warmup: starting at 3 msg/sec, ramping to {original_rate} over 15s")
                 # Schedule gradual ramp-up in background
                 async def _warmup_ramp():
-                    steps = [(5, 15), (7, 30), (9, 45), (original_rate, 60)]
+                    steps = [(5, 5), (7, 10), (original_rate, 15)]
                     for target_rate, delay_s in steps:
                         await asyncio.sleep(delay_s)
                         global_rate_limiter.rate = target_rate
