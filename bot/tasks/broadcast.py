@@ -41,10 +41,10 @@ MEDIA_CONCURRENCY = {
     'video': 5,
     'document': 5,
 }
-SEND_DELAY_BASE = 0.05       # Base delay, always jittered (rate limiter does the heavy pacing)
+SEND_DELAY_BASE = 0.0        # Rate limiter handles all pacing — no extra delay needed
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 20
+CHUNK_SIZE = 50              # Larger chunks = fewer inter-chunk gaps
 
 # Broadcast entropy — rotated intro phrases for single-media sends
 # Reduces repetitive message fingerprint detection
@@ -264,10 +264,11 @@ async def _send_with_semaphore(
     async with semaphore:
         await global_rate_limiter.consume()
         result = await send_media_to_user(bot, pool, user_id, media_items, session_id, uploader_name)
-        # Randomized delay with dynamic slowdown applied
-        jitter = random.uniform(0.8, 1.5)
-        delay = SEND_DELAY_BASE * jitter * global_rate_limiter.slowdown
-        await asyncio.sleep(delay)
+        # Minimal delay only when slowdown is active (FloodWait recovery)
+        if global_rate_limiter.slowdown > 1.0:
+            jitter = random.uniform(0.8, 1.5)
+            delay = 0.05 * jitter * global_rate_limiter.slowdown
+            await asyncio.sleep(delay)
         return result
 
 
@@ -326,9 +327,9 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
             else:
                 fail_count += 1
 
-        # Randomized breathing room between chunks — prevents robotic timing
+        # Minimal gap between chunks — rate limiter handles pacing
         if i + CHUNK_SIZE < total_targets:
-            await asyncio.sleep(random.uniform(0.2, 0.8))
+            await asyncio.sleep(random.uniform(0.05, 0.15))
 
     elapsed = round(time.monotonic() - start_time, 1)
     type_label = "album" if len(media_items) > 1 else "media"
@@ -427,7 +428,7 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             # then marked as sent, then move to next item. Simple and reliable.
             for items in grouped_media.values():
                 await broadcast_item(bot, pool, items, recipients, default_semaphore)
-                await asyncio.sleep(random.uniform(0.3, 1.0))
+                await asyncio.sleep(random.uniform(0.1, 0.3))
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {safe_error(e)}")
