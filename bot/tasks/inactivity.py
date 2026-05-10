@@ -29,6 +29,8 @@ async def check_inactivity(bot: Bot, pool: asyncpg.Pool):
 
             for user in kicked:
                 try:
+                    from utils.limiter import global_rate_limiter
+                    await global_rate_limiter.consume()
                     await bot.send_message(
                         user['id'],
                         "💤 <b>You have been marked inactive.</b>\n\n"

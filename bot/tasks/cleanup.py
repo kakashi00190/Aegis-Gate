@@ -108,6 +108,8 @@ async def delete_session_messages(bot: Bot, pool: asyncpg.Pool, session_id: int)
     initial_bar = generate_progress_bar(0)
     for user in users:
         try:
+            from utils.limiter import global_rate_limiter
+            await global_rate_limiter.consume()
             # ONLY send real-time progress to the Admin to avoid rate limits
             from config import is_admin
             if is_admin(user['id']):
@@ -132,7 +134,6 @@ async def delete_session_messages(bot: Bot, pool: asyncpg.Pool, session_id: int)
             await mark_user_blocked(pool, user['id'])
         except Exception:
             pass
-        await asyncio.sleep(0.02)
 
     semaphore = asyncio.Semaphore(CLEANUP_CONCURRENCY)
     last_update_processed = 0
@@ -232,6 +233,8 @@ async def delete_session_messages(bot: Bot, pool: asyncpg.Pool, session_id: int)
     for user in users:
         if user['id'] not in progress_msgs:
             try:
+                from utils.limiter import global_rate_limiter
+                await global_rate_limiter.consume()
                 await bot.send_message(user['id'], done_text, parse_mode="HTML")
             except Exception:
                 pass
@@ -251,12 +254,13 @@ async def _broadcast_cleanup_done(bot: Bot, pool: asyncpg.Pool):
     users = await get_all_notifiable_users(pool)
     for user in users:
         try:
+            from utils.limiter import global_rate_limiter
+            await global_rate_limiter.consume()
             await bot.send_message(user['id'], done_text, parse_mode="HTML")
         except TelegramForbiddenError:
             await mark_user_blocked(pool, user['id'])
         except Exception:
             pass
-        await asyncio.sleep(0.03)
 
 
 async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
@@ -284,6 +288,8 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
 
     for user in users:
         try:
+            from utils.limiter import global_rate_limiter
+            await global_rate_limiter.consume()
             # ONLY send real-time progress to the Admin to avoid rate limits
             from config import is_admin
             if is_admin(user['id']):
@@ -307,7 +313,6 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
             await mark_user_blocked(pool, user['id'])
         except Exception:
             pass
-        await asyncio.sleep(0.03)
 
     semaphore = asyncio.Semaphore(CLEANUP_CONCURRENCY)
     last_update_processed = 0
@@ -416,6 +421,8 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
     for user in users:
         if user['id'] not in progress_msgs:
             try:
+                from utils.limiter import global_rate_limiter
+                await global_rate_limiter.consume()
                 await bot.send_message(user['id'], done_text, parse_mode="HTML")
             except Exception:
                 pass

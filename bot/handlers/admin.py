@@ -687,6 +687,8 @@ async def cb_ban_user(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
     user_id = int(callback.data.split("_")[-1])
     await ban_user(pool, user_id)
     try:
+        from utils.limiter import global_rate_limiter
+        await global_rate_limiter.consume()
         await bot.send_message(user_id, "🚫 You have been banned from this bot.")
     except Exception:
         pass
@@ -724,6 +726,8 @@ async def cb_unban_user(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
     user_id = int(callback.data.split("_")[-1])
     await unban_user(pool, user_id)
     try:
+        from utils.limiter import global_rate_limiter
+        await global_rate_limiter.consume()
         await bot.send_message(user_id, "✅ You have been unbanned. Use /start to continue.")
     except Exception:
         pass
@@ -1826,8 +1830,10 @@ async def cb_report_media(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot)
 
     try:
         # Send report to all admins
+        from utils.limiter import global_rate_limiter
         last_msg = None
         for admin_id in ADMIN_IDS:
+            await global_rate_limiter.consume()
             if media['media_type'] == 'photo':
                 last_msg = await bot.send_photo(admin_id, media['file_id'],
                                        caption=caption, parse_mode="HTML", reply_markup=kb)
