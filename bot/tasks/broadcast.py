@@ -44,8 +44,8 @@ MEDIA_CONCURRENCY = {
 SEND_DELAY_BASE = 0.0        # Rate limiter handles all pacing — no extra delay needed
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 20              # Smaller chunks = fewer concurrent in-flight requests
-MAX_RECIPIENTS_PER_ITEM = 80 # Anti-detection: limit recipients so not every media goes to all users
+CHUNK_SIZE = 15              # Smaller chunks = fewer concurrent in-flight requests
+MAX_RECIPIENTS_PER_ITEM = 60 # Anti-detection: limit recipients per item. 80 was too high.
 
 # Broadcast entropy — varied caption formats to break fingerprint detection
 # Different patterns: emoji+name, name only, decorative, subtle, expressive
@@ -407,6 +407,11 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
     _global_media_semaphores = _media_semaphores
 
     last_status_log = time.monotonic()
+    broadcasts_since_cooldown = 0  # Proactive cooldown counter
+    COOLDOWN_EVERY_N = 10          # Take a break after every N broadcasts
+    COOLDOWN_DURATION = (45, 90)   # 45-90s proactive cooldown
+    BACKLOG_HIGH_THRESHOLD = 50    # If this many items pending, enter high-throughput mode
+    BACKLOG_CRITICAL_THRESHOLD = 200  # If this many items pending, enter critical mode
 
     while True:
         health_monitor.update("broadcast_queue")
@@ -445,12 +450,12 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 # Warmup: gradually ramp up rate limiter over 15s to avoid cold-start burst
                 # Telegram detects bots that start at full speed immediately after restart
                 original_rate = global_rate_limiter.rate
-                global_rate_limiter.rate = 3
-                global_rate_limiter.tokens = min(global_rate_limiter.tokens, 3)
-                logger.info(f"Warmup: starting at 3 msg/sec, ramping to {original_rate} over 15s")
+                global_rate_limiter.rate = 2
+                global_rate_limiter.tokens = min(global_rate_limiter.tokens, 2)
+                logger.info(f"Warmup: starting at 2 msg/sec, ramping to {original_rate} over 20s")
                 # Schedule gradual ramp-up in background
                 async def _warmup_ramp():
-                    steps = [(5, 5), (7, 10), (original_rate, 15)]
+                    steps = [(3, 5), (4, 12), (original_rate, 20)]
                     for target_rate, delay_s in steps:
                         await asyncio.sleep(delay_s)
                         global_rate_limiter.rate = target_rate
@@ -471,9 +476,8 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 except Exception as e:
                     logger.error(f"Startup unclaim error: {safe_error(e)}")
 
-            # Claim 30 items per cycle — smaller batches mean faster loops,
-            # so new uploads get picked up within seconds of becoming eligible
-            raw_items = await claim_due_broadcasts(pool, limit=30)
+            # Claim 25 items per cycle — balanced between throughput and volume
+            raw_items = await claim_due_broadcasts(pool, limit=25)
             if not raw_items:
                 # Periodic status log even if no items
                 now = time.monotonic()
@@ -485,7 +489,43 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 await asyncio.sleep(random.uniform(1.5, 4.0))
                 continue
 
-            logger.info(f"Claimed {len(raw_items)} media items for broadcast to {len(recipients)} potential recipients.")
+            # Adaptive throughput: check backlog and adjust speed
+            # Normal (0-49 pending): 5/sec, cooldown every 10, 8-20s gaps
+            # High (50-199 pending): 7/sec, cooldown every 15, 5-15s gaps  
+            # Critical (200+ pending): 8/sec, cooldown every 20, 3-10s gaps
+            try:
+                async with pool.acquire() as conn:
+                    backlog_count = await conn.fetchval(
+                        "SELECT COUNT(*) FROM media WHERE sent_at IS NULL AND scheduled_at <= NOW()"
+                    ) or 0
+            except:
+                backlog_count = len(raw_items)
+            
+            if backlog_count >= BACKLOG_CRITICAL_THRESHOLD:
+                effective_rate = 8
+                cooldown_n = 20
+                cooldown_dur = (30, 60)
+                gap_range = (3, 10)
+                mode = "CRITICAL"
+            elif backlog_count >= BACKLOG_HIGH_THRESHOLD:
+                effective_rate = 7
+                cooldown_n = 15
+                cooldown_dur = (35, 75)
+                gap_range = (5, 15)
+                mode = "HIGH"
+            else:
+                effective_rate = 5
+                cooldown_n = 10
+                cooldown_dur = (45, 90)
+                gap_range = (8, 20)
+                mode = "NORMAL"
+            
+            if global_rate_limiter.rate != effective_rate:
+                global_rate_limiter.rate = effective_rate
+                global_rate_limiter.capacity = effective_rate
+                logger.info(f"📈 Adaptive throughput: {mode} mode (backlog={backlog_count}). Rate={effective_rate}/sec, cooldown every {cooldown_n}, gap={gap_range[0]}-{gap_range[1]}s")
+
+            logger.info(f"Claimed {len(raw_items)} media items for broadcast to {len(recipients)} potential recipients. Backlog: {backlog_count} ({mode})")
             last_status_log = time.monotonic()
 
             # Group items by media_group_id or ID if no media_group_id
@@ -525,9 +565,19 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             # Concurrent broadcasts cause FloodWait avalanche (3 broadcasts
             # fight for same 25 tokens/sec = 75 effective rate = instant flood).
             for items in grouped_media.values():
+                # Proactive cooldown: after N broadcasts, take a longer break
+                # This prevents the sustained-volume pattern that triggers violations
+                broadcasts_since_cooldown += 1
+                if broadcasts_since_cooldown >= cooldown_n:
+                    cooldown = random.uniform(*cooldown_dur)
+                    logger.info(f"🧊 Proactive cooldown: {cooldown:.0f}s after {cooldown_n} broadcasts ({mode} mode)")
+                    await asyncio.sleep(cooldown)
+                    broadcasts_since_cooldown = 0
+                
                 await broadcast_item(bot, pool, items, recipients, default_semaphore)
+                
                 # Anti-detection: random delay between items breaks rapid-fire pattern
-                await asyncio.sleep(random.uniform(5, 15))
+                await asyncio.sleep(random.uniform(*gap_range))
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {safe_error(e)}")

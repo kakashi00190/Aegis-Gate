@@ -192,7 +192,8 @@ class TokenBucketLimiter:
             # Reset wait counter after successful consume — prevents unbounded growth
             self.wait_count = 0
 
-# Telegram allows ~30 messages per second to different users
-# We use 10 — very conservative. 15 caused 62s FloodWaits.
-# Bot was flagged/violated at 15. Need to stay low to recover trust.
-global_rate_limiter = TokenBucketLimiter(rate=10, capacity=10)
+# Telegram allows ~30 messages per second to different users (BURST)
+# Sustained 24/7 sending must be MUCH lower to avoid violations.
+# 15 → violated. 10 → violated again. 5 is the safe sustained rate.
+# The 30/sec limit is burst-only; sustained high volume = spam pattern.
+global_rate_limiter = TokenBucketLimiter(rate=5, capacity=5)
