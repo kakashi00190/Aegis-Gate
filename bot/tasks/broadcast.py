@@ -264,7 +264,7 @@ async def send_media_to_user(
             await asyncio.sleep(wait_time)
             # Re-acquire rate limiter token before retry — without this,
             # all post-FloodWait retries fire at once causing another cascade
-            await global_rate_limiter.consume()
+            await global_rate_limiter.consume_for_user(user_id)
             continue
 
         except TelegramForbiddenError as e:
