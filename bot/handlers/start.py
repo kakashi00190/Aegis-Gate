@@ -471,6 +471,8 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
             await set_referred_by(pool, message.from_user.id, referrer['id'])
             # Notify referrer that someone signed up via their link
             try:
+                from utils.limiter import global_rate_limiter
+                await global_rate_limiter.consume()
                 await message.bot.send_message(
                     referrer['id'],
                     "👋 <b>New referral signed up!</b>\n\n"

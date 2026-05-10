@@ -68,6 +68,8 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
                         new_badges, referrer_id
                     )
                     try:
+                        from utils.limiter import global_rate_limiter
+                        await global_rate_limiter.consume()
                         await bot.send_message(
                             referrer_id,
                             f"🏅 <b>New Referral Badge Unlocked!</b>\n\n"
@@ -80,6 +82,8 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
                         pass
                 else:
                     try:
+                        from utils.limiter import global_rate_limiter
+                        await global_rate_limiter.consume()
                         await bot.send_message(
                             referrer_id,
                             f"🎁 <b>Referral Activated!</b>\n\n"
@@ -91,6 +95,8 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
                         pass
             else:
                 try:
+                    from utils.limiter import global_rate_limiter
+                    await global_rate_limiter.consume()
                     await bot.send_message(
                         referrer_id,
                         f"🎁 <b>Referral Activated!</b>\n\n"
