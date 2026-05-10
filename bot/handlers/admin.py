@@ -101,6 +101,8 @@ async def _show_loading(callback: CallbackQuery, label: str = "Loading") -> Mess
             await callback.message.delete()
     except Exception:
         pass
+    from utils.limiter import global_rate_limiter
+    await global_rate_limiter.consume_for_user(callback.from_user.id)
     return await callback.bot.send_message(
         callback.from_user.id,
         f"⏳ <b>{label}...</b>",
@@ -528,6 +530,8 @@ async def admin_view_report(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bo
 
     if report['media_file_id'] and report['media_type']:
         try:
+            from utils.limiter import global_rate_limiter
+            await global_rate_limiter.consume_for_user(callback.from_user.id)
             if report['media_type'] == 'photo':
                 await bot.send_photo(callback.from_user.id, report['media_file_id'],
                                      caption=text, parse_mode="HTML", reply_markup=kb)
@@ -799,6 +803,8 @@ async def admin_delete_media_confirm(callback: CallbackQuery, pool: asyncpg.Pool
         await callback.message.delete()
     except Exception:
         pass
+    from utils.limiter import global_rate_limiter
+    await global_rate_limiter.consume_for_user(callback.from_user.id)
     await callback.bot.send_message(callback.from_user.id, text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
@@ -813,16 +819,7 @@ async def admin_delete_media_do(callback: CallbackQuery, pool: asyncpg.Pool, bot
 
     await callback.answer("🗑 Deleting media...")
 
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-    progress_msg = await callback.bot.send_message(
-        callback.from_user.id,
-        "🗑 <b>Deleting media...</b>\n\n⏳ Removing from chats and database...",
-        parse_mode="HTML"
-    )
+    progress_msg = await _show_loading(callback, "Deleting media")
 
     result = await delete_media_sent_messages(bot, pool, media_id)
 
@@ -914,16 +911,7 @@ async def admin_purge_user_media_do(callback: CallbackQuery, pool: asyncpg.Pool,
 
     await callback.answer("🗑 Purging media...")
 
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-    progress_msg = await callback.bot.send_message(
-        callback.from_user.id,
-        "🗑 <b>Purging user media...</b>\n\n⏳ Deleting from chats and database...",
-        parse_mode="HTML"
-    )
+    progress_msg = await _show_loading(callback, "Purging user media")
 
     result = await purge_user_sent_messages(bot, pool, user_id)
 

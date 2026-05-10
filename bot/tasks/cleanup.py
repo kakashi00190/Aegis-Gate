@@ -234,7 +234,7 @@ async def delete_session_messages(bot: Bot, pool: asyncpg.Pool, session_id: int)
         if user['id'] not in progress_msgs:
             try:
                 from utils.limiter import global_rate_limiter
-                await global_rate_limiter.consume()
+                await global_rate_limiter.consume_for_user(user['id'])
                 await bot.send_message(user['id'], done_text, parse_mode="HTML")
             except Exception:
                 pass
