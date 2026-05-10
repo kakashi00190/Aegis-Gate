@@ -532,7 +532,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         # Brief auto-deleting confirmation — shows feedback then cleans itself
         try:
             from utils.limiter import global_rate_limiter
-            await global_rate_limiter.consume()  # Rate-limit this send too
+            await global_rate_limiter.consume_for_user(user_id)  # Rate-limit this send too
             confirm = await bot.send_message(user_id, "📸 Received!", parse_mode="HTML")
             # Auto-delete after 3 seconds to keep chat clean
             asyncio.create_task(_auto_delete_message(bot, user_id, confirm.message_id, delay=3))

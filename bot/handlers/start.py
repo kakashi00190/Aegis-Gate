@@ -271,7 +271,8 @@ async def disclaimer_accept(callback: CallbackQuery, state: FSMContext, pool: as
 
     # Try to pin the terms message
     try:
-        from aiogram import Bot
+        from utils.limiter import global_rate_limiter
+        await global_rate_limiter.consume_for_user(callback.message.chat.id)
         bot = callback.bot
         await bot.pin_chat_message(callback.message.chat.id, terms_msg.message_id, disable_notification=True)
     except Exception:
@@ -440,6 +441,8 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
     threshold = int(config.get('activation_threshold', '10'))
 
     # --- Activation Animation (2 frames instead of 5 — fewer API calls to same user) ---
+    from utils.limiter import global_rate_limiter
+    await global_rate_limiter.consume_for_user(message.from_user.id)
     anim1 = await message.answer("🔄 <b>Activating your account</b> ⠋", parse_mode="HTML")
     await asyncio.sleep(0.6)
     await anim1.edit_text("🔄 <b>Activating your account</b> ⠸", parse_mode="HTML")
@@ -484,11 +487,14 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
         logger.info(f"User {message.from_user.id} joined without referral code")
 
     # Final animation frame
+    await global_rate_limiter.consume_for_user(message.from_user.id)
     await anim1.edit_text("✅ <b>Account Activated!</b>", parse_mode="HTML")
     await asyncio.sleep(0.6)
+    await global_rate_limiter.consume_for_user(message.from_user.id)
     await anim1.delete()
 
     # Welcome message
+    await global_rate_limiter.consume_for_user(message.from_user.id)
     await message.answer(
         f"🎉 <b>Welcome aboard, {name}!</b>\n\n"
         f"Your anonymous identity: <b>{name}</b>\n"
@@ -505,6 +511,7 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
     # Send referral card
     invite_key = await get_invite_key(pool)
     link = f"https://t.me/{BOT_USERNAME}?start={invite_key}--{ref_code}"
+    await global_rate_limiter.consume_for_user(message.from_user.id)
     await message.answer(
         "🎁 <b>Invite Friends & Earn</b>\n\n"
         "🔗 <b>Your Personal Invite Link</b>\n\n"
