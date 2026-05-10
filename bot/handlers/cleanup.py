@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import random
+import time
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.enums import ParseMode
@@ -249,3 +251,113 @@ async def cleanup_callback(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot
         )
         
         _cleanup_state.pop(user_id, None)
+
+
+async def auto_cleanup_duplicates_task(bot: Bot, pool: asyncpg.Pool):
+    """Background task: automatically removes duplicate media from ALL users' chats.
+    Runs every 2-4 hours (random). Scans users who have received media,
+    finds duplicates, deletes them silently, and sends a brief notification
+    only when duplicates were actually removed."""
+    
+    # Wait 5 minutes after startup before first run
+    await asyncio.sleep(300)
+    
+    while True:
+        try:
+            # Get ALL users who have received media (active + inactive + blocked)
+            # This ensures even inactive users get their duplicates cleaned
+            async with pool.acquire() as conn:
+                user_ids = await conn.fetch("""
+                    SELECT DISTINCT recipient_id 
+                    FROM sent_messages 
+                    WHERE sent_at > NOW() - INTERVAL '48 hours'
+                """)
+            
+            if not user_ids:
+                logger.info("Auto-cleanup: no users with recent media to scan")
+                await asyncio.sleep(random.uniform(7200, 14400))
+                continue
+            
+            # Shuffle and take a batch — don't process all users at once
+            user_list = [u['recipient_id'] for u in user_ids]
+            random.shuffle(user_list)
+            batch_size = min(20, len(user_list))
+            batch = user_list[:batch_size]
+            
+            total_cleaned = 0
+            total_deleted_msgs = 0
+            
+            for user_id in batch:
+                try:
+                    # Find duplicates for this user
+                    duplicates = await get_user_duplicate_media(pool, user_id)
+                    
+                    if not duplicates:
+                        continue
+                    
+                    # Calculate what to delete
+                    messages_to_delete = []
+                    for d in duplicates:
+                        msg_ids = d['message_ids']
+                        messages_to_delete.extend(msg_ids[1:])  # Keep first, delete rest
+                    
+                    if not messages_to_delete:
+                        continue
+                    
+                    total_dup_count = sum(d['count'] - 1 for d in duplicates)
+                    
+                    # Delete duplicate messages from user's Telegram chat
+                    deleted_count = 0
+                    for msg_id in messages_to_delete:
+                        try:
+                            await bot.delete_message(user_id, msg_id)
+                            deleted_count += 1
+                        except TelegramBadRequest:
+                            pass  # Message already deleted
+                        except TelegramForbiddenError:
+                            break  # Bot blocked by user, stop trying
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.3)  # Rate limit safety
+                    
+                    # Clean up sent_messages records
+                    if messages_to_delete:
+                        await delete_user_duplicate_messages(pool, user_id, messages_to_delete)
+                    
+                    if deleted_count > 0:
+                        total_cleaned += 1
+                        total_deleted_msgs += deleted_count
+                        logger.info(f"Auto-cleanup: removed {deleted_count} duplicates for user {user_id}")
+                        
+                        # Send brief notification to user
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"🧹 <b>Auto-cleanup</b>\n\n"
+                                f"Removed {deleted_count} duplicate media from your chat.\n"
+                                f"Your original files are safe! ✅\n\n"
+                                f"Use /cleanup anytime for manual cleanup.",
+                                parse_mode=ParseMode.HTML
+                            )
+                        except Exception:
+                            pass  # User may have blocked bot
+                    
+                except Exception as e:
+                    logger.debug(f"Auto-cleanup error for user {user_id}: {safe_error(e)}")
+                    continue
+                
+                # Small delay between users to avoid rate limits
+                await asyncio.sleep(random.uniform(1.0, 2.5))
+            
+            if total_cleaned > 0:
+                logger.info(f"Auto-cleanup cycle complete: {total_cleaned} users cleaned, {total_deleted_msgs} duplicate messages removed")
+            else:
+                logger.info("Auto-cleanup cycle complete: no duplicates found in this batch")
+        
+        except Exception as e:
+            logger.error(f"Auto-cleanup task error: {safe_error(e)}")
+        
+        # Wait 2-4 hours before next cycle (random to avoid predictable patterns)
+        wait = random.uniform(7200, 14400)
+        logger.info(f"Auto-cleanup: next cycle in {wait/3600:.1f} hours")
+        await asyncio.sleep(wait)

@@ -500,8 +500,12 @@ async def admin_view_report(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bo
         ],
         [
             InlineKeyboardButton(
-                text="🗑 Delete Media",
+                text="🗑 Delete This Media",
                 callback_data=f"admin_del_media_{report_id}"
+            ),
+            InlineKeyboardButton(
+                text="💣 Purge All from User",
+                callback_data=f"admin_purge_user_media_{report['uploader_id']}"
             ),
         ],
         [InlineKeyboardButton(text="◀️ Back", callback_data="admin_reports_0")],

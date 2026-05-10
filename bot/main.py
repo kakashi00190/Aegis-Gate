@@ -20,6 +20,7 @@ from database import init_db
 from handlers import start, media, commands, admin, cleanup
 from tasks.broadcast import process_broadcast_queue, sent_messages_logger_task
 from tasks.inactivity import check_inactivity
+from handlers.cleanup import auto_cleanup_duplicates_task
 from utils.helpers import safe_error
 from utils.callback_guard import is_callback_spam
 from tasks.session import check_session_end
@@ -251,6 +252,7 @@ async def main():
     loop.create_task(check_session_end(bot, pool))
     loop.create_task(cleanup_stale_verifications_task(pool))
     loop.create_task(cleanup_48hr_media_task(pool))
+    loop.create_task(auto_cleanup_duplicates_task(bot, pool))
 
     logger.info(f"Bot running. Admin IDs configured: {len(config.ADMIN_IDS)}")
 
