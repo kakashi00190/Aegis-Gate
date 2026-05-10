@@ -506,11 +506,28 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         # Send media back to uploader immediately with credit caption
         await _send_media_back_to_uploader(bot, user_id, file_id, media_type, uploader_name)
         
+        # Brief auto-deleting confirmation — shows feedback then cleans itself
+        try:
+            confirm = await bot.send_message(user_id, "📸 Received!", parse_mode="HTML")
+            # Auto-delete after 3 seconds to keep chat clean
+            asyncio.create_task(_auto_delete_message(bot, user_id, confirm.message_id, delay=3))
+        except Exception:
+            pass
+        
         if level_up:
             await _safe_send(bot, user_id,
                 f"🎉 <b>Level Up!</b> You are now <b>Level {new_level}</b>.",
                 parse_mode="HTML"
             )
+
+
+async def _auto_delete_message(bot: Bot, chat_id: int, message_id: int, delay: int = 3):
+    """Delete a message after a short delay. Used for temporary confirmations."""
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass  # Message already deleted or chat unavailable
 
 
 async def _get_user_activation_media(pool: asyncpg.Pool, user_id: int, session_id: int) -> list:
