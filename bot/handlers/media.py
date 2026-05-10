@@ -161,18 +161,18 @@ async def _safe_answer(message: Message, text: str, **kwargs):
 
 
 async def _safe_send(bot: Bot, chat_id: int, text: str, **kwargs):
-    """Send a bot.send_message() with TelegramRetryAfter handling."""
+    """Send a bot.send_message() with TelegramRetryAfter handling. Returns the Message object."""
     try:
-        await bot.send_message(chat_id, text, **kwargs)
+        return await bot.send_message(chat_id, text, **kwargs)
     except TelegramRetryAfter as e:
         logger.warning(f"Flood control on bot send, waiting {e.retry_after}s")
         await asyncio.sleep(e.retry_after)
         try:
-            await bot.send_message(chat_id, text, **kwargs)
+            return await bot.send_message(chat_id, text, **kwargs)
         except Exception:
-            pass
+            return None
     except Exception:
-        pass
+        return None
 
 _pause_cooldowns: dict[int, float] = {}
 _upload_cooldowns: dict[int, list[float]] = {} # user_id -> [timestamps]
@@ -423,12 +423,13 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                 # One-time prompt: "X media received! Continue uploading?" (no buttons)
                 if user_id not in _activation_prompt_sent:
                     _activation_prompt_sent.add(user_id)
-                    await _safe_send(bot, user_id,
+                    prompt = await _safe_send(bot, user_id,
                         f"📸 {sent_count} media received! Do you want to continue uploading more?",
                         parse_mode="HTML"
                     )
+                    logger.info(f"Sent one-time continue prompt to user {user_id}: sent={prompt is not None}")
                 
-                logger.info(f"User {user_id} activated. Sent {sent_count} media back to uploader.")
+                logger.info(f"User {user_id} activated. Sent {sent_count}/{len(activation_media)} media back to uploader.")
         else:
             remaining = activation_threshold - new_total
             # Delete previous progress counter message
@@ -494,6 +495,14 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         return
 
     if user['status'] == 'active':
+        # Clean up any stale progress counter from activation
+        old_msg_id = _activation_progress_msgs.pop(user_id, None)
+        if old_msg_id:
+            try:
+                await bot.delete_message(user_id, old_msg_id)
+            except Exception:
+                pass
+        
         # Send media back to uploader immediately with credit caption
         await _send_media_back_to_uploader(bot, user_id, file_id, media_type, uploader_name)
         
