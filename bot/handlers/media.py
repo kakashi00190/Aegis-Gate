@@ -181,6 +181,11 @@ COOLDOWN_TTL = 600
 MAX_UPLOADS_PER_WINDOW = 100000 
 WINDOW_SECONDS = 60
 
+# Track activation progress messages per user — delete previous counter when new one comes
+_activation_progress_msgs: dict[int, int] = {}  # user_id -> message_id of last progress msg
+# Track if user has seen the one-time "continue uploading?" prompt after activation
+_activation_prompt_sent: set = set()
+
 
 def _cleanup_cooldowns(cooldowns: dict, ttl: int = COOLDOWN_TTL):
     now = time.time()
@@ -198,6 +203,35 @@ def _cleanup_cooldowns(cooldowns: dict, ttl: int = COOLDOWN_TTL):
         expired = [k for k, v in cooldowns.items() if now - v > ttl]
         for k in expired:
             del cooldowns[k]
+
+
+async def _send_media_back_to_uploader(bot: Bot, user_id: int, file_id: str, media_type: str, uploader_name: str):
+    """Send a media item back to the uploader with credit caption, so their chat shows it as 'received'."""
+    import random as _r
+    from tasks.broadcast import _ENTROPY_PHRASES, _CAPTION_FORMATS
+    
+    if uploader_name and uploader_name != '?':
+        fmt = _r.choice(_CAPTION_FORMATS)
+        emoji = _r.choice(_ENTROPY_PHRASES)
+        emoji2 = _r.choice(_ENTROPY_PHRASES)
+        credit = fmt.format(emoji=emoji, emoji2=emoji2, name=uploader_name)
+    else:
+        credit = None
+    
+    try:
+        if media_type == 'photo':
+            await bot.send_photo(user_id, file_id, caption=credit)
+        elif media_type == 'video':
+            await bot.send_video(user_id, file_id, caption=credit)
+        elif media_type == 'document':
+            await bot.send_document(user_id, file_id, caption=credit)
+    except Exception as e:
+        err = str(e).lower()
+        if 'blocked' in err or 'deactivated' in err:
+            logger.info(f"User {user_id} blocked bot during send-back. Stopping.")
+            return False
+        logger.debug(f"Failed to send media back to uploader {user_id}: {safe_error(e)}")
+    return True
 
 
 @router.message(F.content_type.in_({
@@ -334,6 +368,15 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         original_message_id=message.message_id
     )
 
+    # 7. Delete user's upload message from their chat — keeps chat clean
+    # User only sees "received" formatted media, never raw uploads
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    uploader_name = updated_user.get('anonymous_name', '?')
+
     if user['status'] == 'pending':
         new_total = updated_user['total_media_lifetime']
         if new_total >= activation_threshold:
@@ -341,23 +384,71 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
             if activated:
                 # Award referral bonus to referrer (if any) now that user is active
                 await _award_referral_bonus(bot, pool, user_id)
-                await _safe_answer(message,
-                    "✅ <b>You are now active!</b>\n\n"
-                    "You will start receiving media from other users.\n"
-                    "Inactivity timer has started — keep uploading to stay active.",
+                
+                # Delete previous progress counter message
+                old_msg_id = _activation_progress_msgs.pop(user_id, None)
+                if old_msg_id:
+                    try:
+                        await bot.delete_message(user_id, old_msg_id)
+                    except Exception:
+                        pass
+                
+                # Send activation complete message (will be deleted after media send-back)
+                activation_msg = await _safe_send(bot, user_id,
+                    f"✅ <b>Activation complete!</b> {new_total} media received.\n\n"
+                    f"Sending your media back to you...",
                     parse_mode="HTML"
                 )
+                
+                # Send all activation media back to uploader with captions
+                # This makes their chat show "received" formatted media like everyone else
+                activation_media = await _get_user_activation_media(pool, user_id, session_id)
+                sent_count = 0
+                for item in activation_media:
+                    ok = await _send_media_back_to_uploader(
+                        bot, user_id, item['file_id'], item['media_type'], uploader_name
+                    )
+                    if ok is False:
+                        break  # User blocked bot
+                    sent_count += 1
+                    await asyncio.sleep(0.5)  # Paced to not look like spam
+                
+                # Delete the "activation complete" message
+                if activation_msg:
+                    try:
+                        await bot.delete_message(user_id, activation_msg.message_id)
+                    except Exception:
+                        pass
+                
+                # One-time prompt: "X media received! Continue uploading?" (no buttons)
+                if user_id not in _activation_prompt_sent:
+                    _activation_prompt_sent.add(user_id)
+                    await _safe_send(bot, user_id,
+                        f"📸 {sent_count} media received! Do you want to continue uploading more?",
+                        parse_mode="HTML"
+                    )
+                
+                logger.info(f"User {user_id} activated. Sent {sent_count} media back to uploader.")
         else:
             remaining = activation_threshold - new_total
-            # Only notify every 5 uploads to avoid flooding user in high-volume bursts
-            if new_total % 5 == 0 or remaining < 3:
-                await _safe_answer(message,
-                    f"📤 <b>Upload received!</b> {new_total}/{activation_threshold}\n"
-                    f"Upload <b>{remaining}</b> more file(s) to activate your account.",
-                    parse_mode="HTML"
-                )
+            # Delete previous progress counter message
+            old_msg_id = _activation_progress_msgs.get(user_id)
+            if old_msg_id:
+                try:
+                    await bot.delete_message(user_id, old_msg_id)
+                except Exception:
+                    pass
+            
+            # Send new progress counter (replaces previous)
+            progress_msg = await _safe_send(bot, user_id,
+                f"📸 {new_total}/{activation_threshold} media received — {remaining} more to upload!",
+                parse_mode="HTML"
+            )
+            if progress_msg:
+                _activation_progress_msgs[user_id] = progress_msg.message_id
+        
         if level_up:
-            await _safe_answer(message,
+            await _safe_send(bot, user_id,
                 f"🎉 <b>Level Up!</b> You are now <b>Level {new_level}</b>.",
                 parse_mode="HTML"
             )
@@ -368,9 +459,11 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         if count >= reactivation_threshold:
             reactivated = await reactivate_user(pool, user_id)
             if reactivated:
+                # Send this upload back immediately (like active users)
+                await _send_media_back_to_uploader(bot, user_id, file_id, media_type, uploader_name)
                 # Deliver missed media in background — user gets what they missed while inactive
                 asyncio.create_task(_deliver_missed_media(bot, pool, user_id))
-                await _safe_answer(message,
+                await _safe_send(bot, user_id,
                     "✅ <b>You have been reactivated!</b>\n\n"
                     "You will receive media from other users again.\n"
                     "Inactivity timer has restarted.",
@@ -378,23 +471,50 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                 )
         else:
             remaining = reactivation_threshold - count
-            # Only notify once during reactivation burst
-            if count == 1:
-                await _safe_answer(message,
-                    f"📤 <b>Upload received!</b> {count}/{reactivation_threshold}\n"
-                    f"Upload <b>{remaining}</b> more file(s) to reactivate your account.",
-                    parse_mode="HTML"
-                )
+            # Delete previous progress counter if any
+            old_msg_id = _activation_progress_msgs.get(user_id)
+            if old_msg_id:
+                try:
+                    await bot.delete_message(user_id, old_msg_id)
+                except Exception:
+                    pass
+            # Show reactivation progress
+            progress_msg = await _safe_send(bot, user_id,
+                f"📸 {count}/{reactivation_threshold} media received — {remaining} more to reactivate!",
+                parse_mode="HTML"
+            )
+            if progress_msg:
+                _activation_progress_msgs[user_id] = progress_msg.message_id
+        
         if level_up:
-            await _safe_answer(message,
+            await _safe_send(bot, user_id,
                 f"🎉 <b>Level Up!</b> You are now <b>Level {new_level}</b>.",
                 parse_mode="HTML"
             )
         return
 
     if user['status'] == 'active':
+        # Send media back to uploader immediately with credit caption
+        await _send_media_back_to_uploader(bot, user_id, file_id, media_type, uploader_name)
+        
         if level_up:
-            await _safe_answer(message,
+            await _safe_send(bot, user_id,
                 f"🎉 <b>Level Up!</b> You are now <b>Level {new_level}</b>.",
                 parse_mode="HTML"
             )
+
+
+async def _get_user_activation_media(pool: asyncpg.Pool, user_id: int, session_id: int) -> list:
+    """Get all media items uploaded by a user during their activation (first session uploads)."""
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT file_id, media_type FROM media 
+                   WHERE user_id = $1 AND session_id = $2 
+                   ORDER BY created_at ASC""",
+                user_id, session_id
+            )
+            return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"Error fetching activation media for user {user_id}: {safe_error(e)}")
+        return []
