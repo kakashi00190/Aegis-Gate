@@ -108,8 +108,16 @@ _active_users_cache = {
 }
 CACHE_TTL = 30  # seconds
 
+def invalidate_active_users_cache():
+    """Force cache refresh on next read. Call when users are blocked/unblocked."""
+    _active_users_cache['timestamp'] = 0
+
 # Module-level media semaphores — populated by process_broadcast_queue on startup
 _global_media_semaphores: dict[str, asyncio.Semaphore] = {}
+
+# Track users who blocked bot during current broadcast cycle
+# Prevents repeated USER_IS_BLOCKED errors within the same cycle
+_blocked_this_cycle: set = set()
 
 from utils.health import health_monitor
 
@@ -256,6 +264,8 @@ async def send_media_to_user(
         except TelegramForbiddenError as e:
             logger.info(f"User {user_id} blocked the bot (403). Marking as blocked in DB.")
             await mark_user_blocked(pool, user_id)
+            invalidate_active_users_cache()  # Remove from next broadcast cycle
+            _blocked_this_cycle.add(user_id)  # Skip in current cycle too
             return False
 
         except TelegramBadRequest as e:
@@ -267,6 +277,8 @@ async def send_media_to_user(
             if 'USER_IS_BLOCKED' in err_str:
                 logger.info(f"User {user_id} blocked the bot (USER_IS_BLOCKED). Marking as blocked in DB.")
                 await mark_user_blocked(pool, user_id)
+                invalidate_active_users_cache()  # Remove from next broadcast cycle
+                _blocked_this_cycle.add(user_id)  # Skip in current cycle too
                 return False
             logger.error(f"Error sending to {user_id}: {safe_error(e)}")
             if attempt < MAX_RETRIES:
@@ -321,6 +333,9 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
     uploader_name = first_item.get('anonymous_name', '?')
 
     target_users = [r for r in recipients if r['id'] != uploader_id]
+    # Filter out users who blocked the bot earlier in this cycle
+    if _blocked_this_cycle:
+        target_users = [r for r in target_users if r['id'] not in _blocked_this_cycle]
     total_targets = len(target_users)
 
     if not target_users:
@@ -415,6 +430,8 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
 
     while True:
         health_monitor.update("broadcast_queue")
+        # Clear blocked users set at start of each cycle
+        _blocked_this_cycle.clear()
         try:
             paused, _ = await is_session_paused(pool)
             if paused:
