@@ -194,6 +194,6 @@ class TokenBucketLimiter:
 
 # Telegram allows ~30 messages per second to different users (BURST)
 # Sustained 24/7 sending must be MUCH lower to avoid violations.
-# 15 → violated. 10 → violated again. 5 is the safe sustained rate.
-# The 30/sec limit is burst-only; sustained high volume = spam pattern.
-global_rate_limiter = TokenBucketLimiter(rate=5, capacity=5)
+# 15 → violated. 10 → violated. 5 → violated with send-back feature.
+# 3 is the safe sustained rate when broadcasts + send-backs + confirmations all share it.
+global_rate_limiter = TokenBucketLimiter(rate=3, capacity=3)

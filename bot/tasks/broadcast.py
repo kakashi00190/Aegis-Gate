@@ -467,12 +467,12 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 # Warmup: gradually ramp up rate limiter over 15s to avoid cold-start burst
                 # Telegram detects bots that start at full speed immediately after restart
                 original_rate = global_rate_limiter.rate
-                global_rate_limiter.rate = 2
-                global_rate_limiter.tokens = min(global_rate_limiter.tokens, 2)
-                logger.info(f"Warmup: starting at 2 msg/sec, ramping to {original_rate} over 20s")
+                global_rate_limiter.rate = 1
+                global_rate_limiter.tokens = min(global_rate_limiter.tokens, 1)
+                logger.info(f"Warmup: starting at 1 msg/sec, ramping to {original_rate} over 30s")
                 # Schedule gradual ramp-up in background
                 async def _warmup_ramp():
-                    steps = [(3, 5), (4, 12), (original_rate, 20)]
+                    steps = [(2, 10), (original_rate, 30)]
                     for target_rate, delay_s in steps:
                         await asyncio.sleep(delay_s)
                         global_rate_limiter.rate = target_rate
@@ -507,9 +507,9 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 continue
 
             # Adaptive throughput: check backlog and adjust speed
-            # Normal (0-49 pending): 5/sec, cooldown every 10, 8-20s gaps
-            # High (50-199 pending): 7/sec, cooldown every 15, 5-15s gaps  
-            # Critical (200+ pending): 8/sec, cooldown every 20, 3-10s gaps
+            # Normal (0-49 pending): 3/sec, cooldown every 10, 8-20s gaps
+            # High (50-199 pending): 4/sec, cooldown every 15, 5-15s gaps  
+            # Critical (200+ pending): 5/sec, cooldown every 20, 3-10s gaps
             try:
                 async with pool.acquire() as conn:
                     backlog_count = await conn.fetchval(
@@ -519,19 +519,19 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 backlog_count = len(raw_items)
             
             if backlog_count >= BACKLOG_CRITICAL_THRESHOLD:
-                effective_rate = 8
+                effective_rate = 5
                 cooldown_n = 20
                 cooldown_dur = (30, 60)
                 gap_range = (3, 10)
                 mode = "CRITICAL"
             elif backlog_count >= BACKLOG_HIGH_THRESHOLD:
-                effective_rate = 7
+                effective_rate = 4
                 cooldown_n = 15
                 cooldown_dur = (35, 75)
                 gap_range = (5, 15)
                 mode = "HIGH"
             else:
-                effective_rate = 5
+                effective_rate = 3
                 cooldown_n = 10
                 cooldown_dur = (45, 90)
                 gap_range = (8, 20)

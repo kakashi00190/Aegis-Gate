@@ -161,13 +161,17 @@ async def _safe_answer(message: Message, text: str, **kwargs):
 
 
 async def _safe_send(bot: Bot, chat_id: int, text: str, **kwargs):
-    """Send a bot.send_message() with TelegramRetryAfter handling. Returns the Message object."""
+    """Send a bot.send_message() with TelegramRetryAfter handling. Returns the Message object.
+    Uses global rate limiter to prevent violation."""
+    from utils.limiter import global_rate_limiter
     try:
+        await global_rate_limiter.consume()
         return await bot.send_message(chat_id, text, **kwargs)
     except TelegramRetryAfter as e:
         logger.warning(f"Flood control on bot send, waiting {e.retry_after}s")
         await asyncio.sleep(e.retry_after)
         try:
+            await global_rate_limiter.consume()
             return await bot.send_message(chat_id, text, **kwargs)
         except Exception:
             return None
@@ -206,9 +210,11 @@ def _cleanup_cooldowns(cooldowns: dict, ttl: int = COOLDOWN_TTL):
 
 
 async def _send_media_back_to_uploader(bot: Bot, user_id: int, file_id: str, media_type: str, uploader_name: str):
-    """Send a media item back to the uploader with credit caption, so their chat shows it as 'received'."""
+    """Send a media item back to the uploader with credit caption, so their chat shows it as 'received'.
+    Uses global rate limiter to prevent violation."""
     import random as _r
     from tasks.broadcast import _ENTROPY_PHRASES, _CAPTION_FORMATS
+    from utils.limiter import global_rate_limiter
     
     if uploader_name and uploader_name != '?':
         fmt = _r.choice(_CAPTION_FORMATS)
@@ -219,6 +225,7 @@ async def _send_media_back_to_uploader(bot: Bot, user_id: int, file_id: str, med
         credit = None
     
     try:
+        await global_rate_limiter.consume()  # Respect global rate limit
         if media_type == 'photo':
             await bot.send_photo(user_id, file_id, caption=credit)
         elif media_type == 'video':
@@ -411,7 +418,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                     if ok is False:
                         break  # User blocked bot
                     sent_count += 1
-                    await asyncio.sleep(0.5)  # Paced to not look like spam
+                    await asyncio.sleep(1.5)  # Paced to not look like spam + not flood API
                 
                 # Delete the "activation complete" message
                 if activation_msg:
@@ -508,6 +515,8 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         
         # Brief auto-deleting confirmation — shows feedback then cleans itself
         try:
+            from utils.limiter import global_rate_limiter
+            await global_rate_limiter.consume()  # Rate-limit this send too
             confirm = await bot.send_message(user_id, "📸 Received!", parse_mode="HTML")
             # Auto-delete after 3 seconds to keep chat clean
             asyncio.create_task(_auto_delete_message(bot, user_id, confirm.message_id, delay=3))
