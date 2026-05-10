@@ -209,6 +209,12 @@ async def send_media_to_user(
                     elif m_type == 'document':
                         media_group.append(InputMediaDocument(media=f_id, caption=cap))
 
+                # CRITICAL: send_media_group sends N items as N separate Telegram messages
+                # but is only 1 API call. We must consume N tokens to account for the
+                # actual message volume — otherwise a 10-item album at 3/sec = 30 msg/sec!
+                for _ in range(len(media_items) - 1):  # -1 because _send_with_semaphore already consumed 1
+                    await global_rate_limiter.consume()
+                
                 messages = await bot.send_media_group(user_id, media_group)
                 if messages and session_id:
                     for i, msg in enumerate(messages):
@@ -315,7 +321,7 @@ async def _send_with_semaphore(
     uploader_name: str = '?'
 ) -> bool:
     async with semaphore:
-        await global_rate_limiter.consume()
+        await global_rate_limiter.consume_for_user(user_id)
         result = await send_media_to_user(bot, pool, user_id, media_items, session_id, uploader_name)
         # Minimal delay only when slowdown is active (FloodWait recovery)
         if global_rate_limiter.slowdown > 1.0:

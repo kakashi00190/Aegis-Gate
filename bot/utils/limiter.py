@@ -145,6 +145,9 @@ class TokenBucketLimiter:
         # Dynamic slowdown: multiplier increases on FloodWait, decays over time
         self._slowdown = 1.0
         self._last_flood = 0.0
+        # Per-user send tracking — prevents sending too fast to one user
+        self._user_last_send: dict[int, float] = {}
+        self._user_min_interval = 1.5  # Min 1.5s between sends to same user
 
     @property
     def slowdown(self) -> float:
@@ -191,6 +194,27 @@ class TokenBucketLimiter:
             self.tokens -= 1
             # Reset wait counter after successful consume — prevents unbounded growth
             self.wait_count = 0
+
+    async def consume_for_user(self, user_id: int):
+        """Consume a token AND enforce per-user minimum interval.
+        Use this for sends directed at a specific user (broadcasts, send-backs, etc).
+        Prevents sending too fast to one user — Telegram enforces per-chat limits."""
+        # First, get a global token
+        await self.consume()
+        # Then enforce per-user interval
+        now = time.monotonic()
+        last = self._user_last_send.get(user_id, 0)
+        wait = self._user_min_interval - (now - last)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        self._user_last_send[user_id] = time.monotonic()
+        # Periodic cleanup of stale user tracking (keep last 1000)
+        if len(self._user_last_send) > 1000:
+            cutoff = now - 60  # Remove entries older than 60s
+            self._user_last_send = {
+                uid: ts for uid, ts in self._user_last_send.items()
+                if ts > cutoff
+            }
 
 # Telegram allows ~30 messages per second to different users (BURST)
 # Sustained 24/7 sending must be MUCH lower to avoid violations.

@@ -69,7 +69,7 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
                     )
                     try:
                         from utils.limiter import global_rate_limiter
-                        await global_rate_limiter.consume()
+                        await global_rate_limiter.consume_for_user(referrer_id)
                         await bot.send_message(
                             referrer_id,
                             f"🏅 <b>New Referral Badge Unlocked!</b>\n\n"
@@ -83,7 +83,7 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
                 else:
                     try:
                         from utils.limiter import global_rate_limiter
-                        await global_rate_limiter.consume()
+                        await global_rate_limiter.consume_for_user(referrer_id)
                         await bot.send_message(
                             referrer_id,
                             f"🎁 <b>Referral Activated!</b>\n\n"
@@ -96,7 +96,7 @@ async def _award_referral_bonus(bot: Bot, pool: asyncpg.Pool, newly_active_user_
             else:
                 try:
                     from utils.limiter import global_rate_limiter
-                    await global_rate_limiter.consume()
+                    await global_rate_limiter.consume_for_user(referrer_id)
                     await bot.send_message(
                         referrer_id,
                         f"🎁 <b>Referral Activated!</b>\n\n"
@@ -121,7 +121,7 @@ async def _deliver_missed_media(bot: Bot, pool: asyncpg.Pool, user_id: int):
         from utils.limiter import global_rate_limiter
         for item in missed:
             try:
-                await global_rate_limiter.consume()
+                await global_rate_limiter.consume_for_user(user_id)
                 media_type = item.get('media_type', 'photo')
                 file_id = item['file_id']
                 uploader_name = item.get('anonymous_name', '?')
@@ -168,16 +168,16 @@ async def _safe_answer(message: Message, text: str, **kwargs):
 
 async def _safe_send(bot: Bot, chat_id: int, text: str, **kwargs):
     """Send a bot.send_message() with TelegramRetryAfter handling. Returns the Message object.
-    Uses global rate limiter to prevent violation."""
+    Uses global rate limiter with per-user interval to prevent violation."""
     from utils.limiter import global_rate_limiter
     try:
-        await global_rate_limiter.consume()
+        await global_rate_limiter.consume_for_user(chat_id)
         return await bot.send_message(chat_id, text, **kwargs)
     except TelegramRetryAfter as e:
         logger.warning(f"Flood control on bot send, waiting {e.retry_after}s")
         await asyncio.sleep(e.retry_after)
         try:
-            await global_rate_limiter.consume()
+            await global_rate_limiter.consume_for_user(chat_id)
             return await bot.send_message(chat_id, text, **kwargs)
         except Exception:
             return None
@@ -231,7 +231,7 @@ async def _send_media_back_to_uploader(bot: Bot, user_id: int, file_id: str, med
         credit = None
     
     try:
-        await global_rate_limiter.consume()  # Respect global rate limit
+        await global_rate_limiter.consume_for_user(user_id)  # Respect global + per-user rate limit
         if media_type == 'photo':
             await bot.send_photo(user_id, file_id, caption=credit)
         elif media_type == 'video':

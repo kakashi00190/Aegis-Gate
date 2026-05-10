@@ -439,15 +439,11 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
 
     threshold = int(config.get('activation_threshold', '10'))
 
-    # --- Activation Animation ---
+    # --- Activation Animation (2 frames instead of 5 — fewer API calls to same user) ---
     anim1 = await message.answer("🔄 <b>Activating your account</b> ⠋", parse_mode="HTML")
-    await asyncio.sleep(0.4)
-    await anim1.edit_text("🔄 <b>Activating your account</b> ⠙", parse_mode="HTML")
-    await asyncio.sleep(0.4)
-    await anim1.edit_text("🔄 <b>Activating your account</b> ⠹", parse_mode="HTML")
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.6)
     await anim1.edit_text("🔄 <b>Activating your account</b> ⠸", parse_mode="HTML")
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.6)
 
     # Create user
     await create_user(pool, message.from_user.id, name)
@@ -472,7 +468,7 @@ async def process_verification(message: Message, state: FSMContext, pool: asyncp
             # Notify referrer that someone signed up via their link
             try:
                 from utils.limiter import global_rate_limiter
-                await global_rate_limiter.consume()
+                await global_rate_limiter.consume_for_user(referrer['id'])
                 await message.bot.send_message(
                     referrer['id'],
                     "👋 <b>New referral signed up!</b>\n\n"

@@ -688,7 +688,7 @@ async def cb_ban_user(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
     await ban_user(pool, user_id)
     try:
         from utils.limiter import global_rate_limiter
-        await global_rate_limiter.consume()
+        await global_rate_limiter.consume_for_user(user_id)
         await bot.send_message(user_id, "🚫 You have been banned from this bot.")
     except Exception:
         pass
@@ -727,7 +727,7 @@ async def cb_unban_user(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
     await unban_user(pool, user_id)
     try:
         from utils.limiter import global_rate_limiter
-        await global_rate_limiter.consume()
+        await global_rate_limiter.consume_for_user(user_id)
         await bot.send_message(user_id, "✅ You have been unbanned. Use /start to continue.")
     except Exception:
         pass
@@ -1236,8 +1236,8 @@ async def admin_announce_confirmed(callback: CallbackQuery, state: FSMContext, p
     last_update = -1
 
     for i, user in enumerate(users, 1):
-        # Rate limiting
-        await global_rate_limiter.consume()
+        # Rate limiting with per-user interval
+        await global_rate_limiter.consume_for_user(user['id'])
 
         try:
             copied = await bot.copy_message(
@@ -1835,7 +1835,7 @@ async def cb_report_media(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot)
         from utils.limiter import global_rate_limiter
         last_msg = None
         for admin_id in ADMIN_IDS:
-            await global_rate_limiter.consume()
+            await global_rate_limiter.consume_for_user(admin_id)
             if media['media_type'] == 'photo':
                 last_msg = await bot.send_photo(admin_id, media['file_id'],
                                        caption=caption, parse_mode="HTML", reply_markup=kb)

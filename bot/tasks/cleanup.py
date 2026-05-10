@@ -109,7 +109,7 @@ async def delete_session_messages(bot: Bot, pool: asyncpg.Pool, session_id: int)
     for user in users:
         try:
             from utils.limiter import global_rate_limiter
-            await global_rate_limiter.consume()
+            await global_rate_limiter.consume_for_user(user['id'])
             # ONLY send real-time progress to the Admin to avoid rate limits
             from config import is_admin
             if is_admin(user['id']):
@@ -255,7 +255,7 @@ async def _broadcast_cleanup_done(bot: Bot, pool: asyncpg.Pool):
     for user in users:
         try:
             from utils.limiter import global_rate_limiter
-            await global_rate_limiter.consume()
+            await global_rate_limiter.consume_for_user(user['id'])
             await bot.send_message(user['id'], done_text, parse_mode="HTML")
         except TelegramForbiddenError:
             await mark_user_blocked(pool, user['id'])
@@ -289,7 +289,7 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
     for user in users:
         try:
             from utils.limiter import global_rate_limiter
-            await global_rate_limiter.consume()
+            await global_rate_limiter.consume_for_user(user['id'])
             # ONLY send real-time progress to the Admin to avoid rate limits
             from config import is_admin
             if is_admin(user['id']):
@@ -422,7 +422,7 @@ async def emergency_wipe_all(bot: Bot, pool: asyncpg.Pool, admin_msg=None):
         if user['id'] not in progress_msgs:
             try:
                 from utils.limiter import global_rate_limiter
-                await global_rate_limiter.consume()
+                await global_rate_limiter.consume_for_user(user['id'])
                 await bot.send_message(user['id'], done_text, parse_mode="HTML")
             except Exception:
                 pass

@@ -250,7 +250,7 @@ async def cmd_report(message: Message, pool: asyncpg.Pool, bot: Bot):
         from utils.limiter import global_rate_limiter
         last_msg = None
         for admin_id in ADMIN_IDS:
-            await global_rate_limiter.consume()
+            await global_rate_limiter.consume_for_user(admin_id)
             if media_type == 'photo':
                 last_msg = await bot.send_photo(admin_id, file_id, caption=caption,
                                            parse_mode="HTML", reply_markup=kb)

@@ -17,7 +17,7 @@ async def _send_all(bot: Bot, pool: asyncpg.Pool, text: str):
     users = await get_all_notifiable_users(pool)
     for user in users:
         try:
-            await global_rate_limiter.consume()
+            await global_rate_limiter.consume_for_user(user['id'])
             await bot.send_message(user['id'], text, parse_mode="HTML")
         except TelegramForbiddenError:
             await mark_user_blocked(pool, user['id'])
@@ -97,7 +97,7 @@ async def broadcast_new_session_started(bot: Bot, pool: asyncpg.Pool, new_sessio
             continue
 
         try:
-            await global_rate_limiter.consume()
+            await global_rate_limiter.consume_for_user(user['id'])
             await bot.send_message(user['id'], text, parse_mode="HTML")
         except TelegramForbiddenError:
             await mark_user_blocked(pool, user['id'])
