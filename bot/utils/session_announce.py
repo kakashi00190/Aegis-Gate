@@ -13,16 +13,16 @@ logger = logging.getLogger(__name__)
 
 
 async def _send_all(bot: Bot, pool: asyncpg.Pool, text: str):
+    from utils.limiter import global_rate_limiter
     users = await get_all_notifiable_users(pool)
     for user in users:
         try:
+            await global_rate_limiter.consume()
             await bot.send_message(user['id'], text, parse_mode="HTML")
         except TelegramForbiddenError:
             await mark_user_blocked(pool, user['id'])
         except Exception:
             pass
-        # Randomized delay — prevents robotic broadcast timing
-        await asyncio.sleep(random.uniform(0.04, 0.08))
 
 
 async def broadcast_session_end(bot: Bot, pool: asyncpg.Pool, result: dict, pause_hours: float):
@@ -97,13 +97,12 @@ async def broadcast_new_session_started(bot: Bot, pool: asyncpg.Pool, new_sessio
             continue
 
         try:
+            await global_rate_limiter.consume()
             await bot.send_message(user['id'], text, parse_mode="HTML")
         except TelegramForbiddenError:
             await mark_user_blocked(pool, user['id'])
         except Exception:
             pass
-        # Randomized delay — prevents robotic broadcast timing
-        await asyncio.sleep(random.uniform(0.04, 0.08))
 
 
 async def broadcast_session_results(bot: Bot, pool: asyncpg.Pool, result: dict, pause_hours: float):

@@ -187,6 +187,8 @@ async def cleanup_callback(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot
             
             for msg_id in batch:
                 try:
+                    from utils.limiter import global_rate_limiter
+                    await global_rate_limiter.consume()
                     await bot.delete_message(user_id, msg_id)
                     deleted_count += 1
                 except TelegramBadRequest:
@@ -310,6 +312,8 @@ async def auto_cleanup_duplicates_task(bot: Bot, pool: asyncpg.Pool):
                     deleted_count = 0
                     for msg_id in messages_to_delete:
                         try:
+                            from utils.limiter import global_rate_limiter
+                            await global_rate_limiter.consume()
                             await bot.delete_message(user_id, msg_id)
                             deleted_count += 1
                         except TelegramBadRequest:

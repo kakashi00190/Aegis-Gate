@@ -495,12 +495,15 @@ async def delete_media_sent_messages(bot: Bot, pool: asyncpg.Pool, media_id: int
     # 1. Delete the original uploader's message from their chat
     if media.get('original_chat_id') and media.get('original_message_id'):
         try:
+            from utils.limiter import global_rate_limiter
+            await global_rate_limiter.consume()
             await bot.delete_message(media['original_chat_id'], media['original_message_id'])
             original_deleted = True
             logger.info(f"Deleted original upload message for media {media_id} from chat {media['original_chat_id']}")
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after)
             try:
+                await global_rate_limiter.consume()
                 await bot.delete_message(media['original_chat_id'], media['original_message_id'])
                 original_deleted = True
             except Exception:
@@ -571,6 +574,8 @@ async def purge_user_sent_messages(bot: Bot, pool: asyncpg.Pool, user_id: int) -
             )
         for row in originals:
             try:
+                from utils.limiter import global_rate_limiter
+                await global_rate_limiter.consume()
                 await bot.delete_message(row['original_chat_id'], row['original_message_id'])
                 original_deleted += 1
             except Exception:

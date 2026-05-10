@@ -402,6 +402,8 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                 old_msg_id = _activation_progress_msgs.pop(user_id, None)
                 if old_msg_id:
                     try:
+                        from utils.limiter import global_rate_limiter
+                        await global_rate_limiter.consume()
                         await bot.delete_message(user_id, old_msg_id)
                     except Exception:
                         pass
@@ -429,6 +431,8 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                 # Delete the "activation complete" message
                 if activation_msg:
                     try:
+                        from utils.limiter import global_rate_limiter
+                        await global_rate_limiter.consume()
                         await bot.delete_message(user_id, activation_msg.message_id)
                     except Exception:
                         pass
@@ -449,6 +453,8 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
             old_msg_id = _activation_progress_msgs.get(user_id)
             if old_msg_id:
                 try:
+                    from utils.limiter import global_rate_limiter
+                    await global_rate_limiter.consume()
                     await bot.delete_message(user_id, old_msg_id)
                 except Exception:
                     pass
@@ -489,6 +495,8 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
             old_msg_id = _activation_progress_msgs.get(user_id)
             if old_msg_id:
                 try:
+                    from utils.limiter import global_rate_limiter
+                    await global_rate_limiter.consume()
                     await bot.delete_message(user_id, old_msg_id)
                 except Exception:
                     pass
@@ -512,6 +520,8 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         old_msg_id = _activation_progress_msgs.pop(user_id, None)
         if old_msg_id:
             try:
+                from utils.limiter import global_rate_limiter
+                await global_rate_limiter.consume()
                 await bot.delete_message(user_id, old_msg_id)
             except Exception:
                 pass
@@ -540,6 +550,8 @@ async def _auto_delete_message(bot: Bot, chat_id: int, message_id: int, delay: i
     """Delete a message after a short delay. Used for temporary confirmations."""
     try:
         await asyncio.sleep(delay)
+        from utils.limiter import global_rate_limiter
+        await global_rate_limiter.consume()
         await bot.delete_message(chat_id, message_id)
     except Exception:
         pass  # Message already deleted or chat unavailable

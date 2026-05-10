@@ -1248,6 +1248,8 @@ async def admin_announce_confirmed(callback: CallbackQuery, state: FSMContext, p
             sent += 1
             if pin_message:
                 try:
+                    from utils.limiter import global_rate_limiter
+                    await global_rate_limiter.consume()
                     await bot.pin_chat_message(
                         chat_id=user['id'],
                         message_id=copied.message_id,
