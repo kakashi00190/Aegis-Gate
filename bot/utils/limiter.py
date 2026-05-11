@@ -176,24 +176,24 @@ class TokenBucketLimiter:
 
     async def consume(self):
         self._recover_slowdown()
-        async with self.lock:
-            while self.tokens < 1:
+        while True:
+            async with self.lock:
                 now = time.monotonic()
                 elapsed = now - self.last_update
                 self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
                 self.last_update = now
-                if self.tokens < 1:
-                    self.wait_count += 1
-                    # Log at 50, then every 200 — avoids spam at high throughput
-                    if self.wait_count == 50 or (self.wait_count > 50 and self.wait_count % 200 == 0):
-                        logger.warning(f"Rate limiter pacing ({self.wait_count} waits, slowdown={self._slowdown:.2f}x). Staying below {self.rate} req/sec.")
-                    # Apply dynamic slowdown with jitter
-                    base_wait = 1 / self.rate
-                    wait = base_wait * self._slowdown * random.uniform(0.8, 1.3)
-                    await asyncio.sleep(wait)
-            self.tokens -= 1
-            # Reset wait counter after successful consume — prevents unbounded growth
-            self.wait_count = 0
+                if self.tokens >= 1:
+                    self.tokens -= 1
+                    self.wait_count = 0
+                    return
+                # Not enough tokens — calculate wait time UNDER lock, then sleep OUTSIDE
+                self.wait_count += 1
+                if self.wait_count == 50 or (self.wait_count > 50 and self.wait_count % 200 == 0):
+                    logger.warning(f"Rate limiter pacing ({self.wait_count} waits, slowdown={self._slowdown:.2f}x). Staying below {self.rate} req/sec.")
+                base_wait = 1 / self.rate
+                wait = base_wait * self._slowdown * random.uniform(0.8, 1.3)
+            # Sleep OUTSIDE the lock — other tasks can proceed concurrently
+            await asyncio.sleep(wait)
 
     async def consume_for_user(self, user_id: int):
         """Consume a token AND enforce per-user minimum interval.
