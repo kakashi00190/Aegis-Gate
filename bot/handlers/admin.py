@@ -102,7 +102,7 @@ async def _show_loading(callback: CallbackQuery, label: str = "Loading") -> Mess
     except Exception:
         pass
     from utils.limiter import global_rate_limiter
-    await global_rate_limiter.consume_for_user(callback.from_user.id)
+    await global_rate_limiter.consume_for_user(callback.from_user.id, priority=True)
     return await callback.bot.send_message(
         callback.from_user.id,
         f"⏳ <b>{label}...</b>",
@@ -531,7 +531,7 @@ async def admin_view_report(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bo
     if report['media_file_id'] and report['media_type']:
         try:
             from utils.limiter import global_rate_limiter
-            await global_rate_limiter.consume_for_user(callback.from_user.id)
+            await global_rate_limiter.consume_for_user(callback.from_user.id, priority=True)
             if report['media_type'] == 'photo':
                 await bot.send_photo(callback.from_user.id, report['media_file_id'],
                                      caption=text, parse_mode="HTML", reply_markup=kb)
@@ -692,7 +692,7 @@ async def cb_ban_user(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
     await ban_user(pool, user_id)
     try:
         from utils.limiter import global_rate_limiter
-        await global_rate_limiter.consume_for_user(user_id)
+        await global_rate_limiter.consume_for_user(user_id, priority=True)
         await bot.send_message(user_id, "🚫 You have been banned from this bot.")
     except Exception:
         pass
@@ -731,7 +731,7 @@ async def cb_unban_user(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
     await unban_user(pool, user_id)
     try:
         from utils.limiter import global_rate_limiter
-        await global_rate_limiter.consume_for_user(user_id)
+        await global_rate_limiter.consume_for_user(user_id, priority=True)
         await bot.send_message(user_id, "✅ You have been unbanned. Use /start to continue.")
     except Exception:
         pass
@@ -804,7 +804,7 @@ async def admin_delete_media_confirm(callback: CallbackQuery, pool: asyncpg.Pool
     except Exception:
         pass
     from utils.limiter import global_rate_limiter
-    await global_rate_limiter.consume_for_user(callback.from_user.id)
+    await global_rate_limiter.consume_for_user(callback.from_user.id, priority=True)
     await callback.bot.send_message(callback.from_user.id, text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 

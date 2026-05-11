@@ -496,8 +496,8 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             
             if global_rate_limiter.rate != effective_rate:
                 global_rate_limiter.rate = effective_rate
-                global_rate_limiter.capacity = effective_rate
-                logger.info(f"📈 Adaptive throughput: {mode} mode (backlog={backlog_count}). Rate={effective_rate}/sec, cooldown every {cooldown_n}, gap={gap_range[0]}-{gap_range[1]}s")
+                global_rate_limiter.capacity = effective_rate * 2  # 2× rate for burst headroom
+                logger.info(f"📈 Adaptive throughput: {mode} mode (backlog={backlog_count}). Rate={effective_rate}/sec, capacity={effective_rate*2}, cooldown every {cooldown_n}, gap={gap_range[0]}-{gap_range[1]}s")
 
             # On first iteration after startup, release stale claims and warmup
             # This must happen BEFORE the first claim so items are available

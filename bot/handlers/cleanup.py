@@ -336,7 +336,7 @@ async def auto_cleanup_duplicates_task(bot: Bot, pool: asyncpg.Pool):
                         # Send brief notification to user
                         try:
                             from utils.limiter import global_rate_limiter
-                            await global_rate_limiter.consume_for_user(user_id)
+                            await global_rate_limiter.consume_for_user(user_id, priority=True)
                             await bot.send_message(
                                 user_id,
                                 f"🧹 <b>Auto-cleanup</b>\n\n"

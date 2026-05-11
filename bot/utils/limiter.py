@@ -174,7 +174,9 @@ class TokenBucketLimiter:
             if self._slowdown < 1.05:
                 self._slowdown = 1.0
 
-    async def consume(self):
+    async def consume(self, priority: bool = False):
+        """Consume a token. If priority=True, reserve 1 token for interactive/user-facing sends.
+        Broadcast tasks should NOT use priority — only handlers responding to user actions."""
         self._recover_slowdown()
         while True:
             async with self.lock:
@@ -182,7 +184,9 @@ class TokenBucketLimiter:
                 elapsed = now - self.last_update
                 self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
                 self.last_update = now
-                if self.tokens >= 1:
+                # Priority: can take the last reserved token (keeps 1 token for interactive)
+                available = self.tokens if priority else max(0, self.tokens - 1)
+                if available >= 1:
                     self.tokens -= 1
                     self.wait_count = 0
                     return
@@ -216,12 +220,14 @@ class TokenBucketLimiter:
             # Sleep OUTSIDE the lock
             await asyncio.sleep(wait)
 
-    async def consume_for_user(self, user_id: int):
+    async def consume_for_user(self, user_id: int, priority: bool = False):
         """Consume a token AND enforce per-user minimum interval.
         Use this for sends directed at a specific user (broadcasts, send-backs, etc).
-        Prevents sending too fast to one user — Telegram enforces per-chat limits."""
+        Prevents sending too fast to one user — Telegram enforces per-chat limits.
+        If priority=True, this is an interactive/user-facing send (handler response)
+        and should get a token even when the bucket is nearly empty."""
         # First, get a global token
-        await self.consume()
+        await self.consume(priority=priority)
         # Then enforce per-user interval
         now = time.monotonic()
         last = self._user_last_send.get(user_id, 0)
@@ -241,4 +247,4 @@ class TokenBucketLimiter:
 # Sustained 24/7 sending must be MUCH lower to avoid violations.
 # 15 → violated. 10 → violated. 5 → violated with send-back feature.
 # 3 is the safe sustained rate when broadcasts + send-backs + confirmations all share it.
-global_rate_limiter = TokenBucketLimiter(rate=3, capacity=3)
+global_rate_limiter = TokenBucketLimiter(rate=3, capacity=6)  # capacity=2×rate for burst headroom
