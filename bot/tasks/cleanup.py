@@ -21,9 +21,10 @@ from utils.helpers import format_timedelta_until, safe_error
 
 logger = logging.getLogger(__name__)
 
-CLEANUP_CONCURRENCY = 4
+CLEANUP_CONCURRENCY = 8   # delete_message is lightweight — Telegram allows ~30/sec
 CLEANUP_BATCH_SIZE = 100
 DELETE_DELAY = 0.05
+DELETE_OWN_INTERVAL = 0.05  # 20 deletes/sec — Telegram's delete limit is much higher than send
 
 
 from utils.limiter import global_rate_limiter
@@ -35,15 +36,16 @@ async def _delete_one_message(
     message_id: int
 ) -> bool:
     async with semaphore:
-        # Rate limiting
-        await global_rate_limiter.consume()
+        # delete_message has its own Telegram limit (~30/sec) separate from send limits.
+        # Do NOT consume send-rate-limiter tokens — it starves broadcasts.
+        # Instead, use a simple per-task delay to stay under delete limits.
+        await asyncio.sleep(DELETE_OWN_INTERVAL)
         
         try:
             await bot.delete_message(chat_id, message_id)
             return True
         except TelegramRetryAfter as e:
-            # Apply dynamic slowdown + randomized recovery (desync workers)
-            global_rate_limiter.apply_flood_pressure()
+            # Flood on delete — wait and retry
             wait = e.retry_after + random.uniform(0.5, 2.0)
             logger.warning(f"Cleanup flood control: waiting {wait:.1f}s")
             await asyncio.sleep(wait)
@@ -495,15 +497,14 @@ async def delete_media_sent_messages(bot: Bot, pool: asyncpg.Pool, media_id: int
     # 1. Delete the original uploader's message from their chat
     if media.get('original_chat_id') and media.get('original_message_id'):
         try:
-            from utils.limiter import global_rate_limiter
-            await global_rate_limiter.consume()
+            await asyncio.sleep(DELETE_OWN_INTERVAL)
             await bot.delete_message(media['original_chat_id'], media['original_message_id'])
             original_deleted = True
             logger.info(f"Deleted original upload message for media {media_id} from chat {media['original_chat_id']}")
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after)
             try:
-                await global_rate_limiter.consume()
+                await asyncio.sleep(DELETE_OWN_INTERVAL)
                 await bot.delete_message(media['original_chat_id'], media['original_message_id'])
                 original_deleted = True
             except Exception:
@@ -574,8 +575,7 @@ async def purge_user_sent_messages(bot: Bot, pool: asyncpg.Pool, user_id: int) -
             )
         for row in originals:
             try:
-                from utils.limiter import global_rate_limiter
-                await global_rate_limiter.consume()
+                await asyncio.sleep(DELETE_OWN_INTERVAL)
                 await bot.delete_message(row['original_chat_id'], row['original_message_id'])
                 original_deleted += 1
             except Exception:

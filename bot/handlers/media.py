@@ -402,8 +402,6 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                 old_msg_id = _activation_progress_msgs.pop(user_id, None)
                 if old_msg_id:
                     try:
-                        from utils.limiter import global_rate_limiter
-                        await global_rate_limiter.consume()
                         await bot.delete_message(user_id, old_msg_id)
                     except Exception:
                         pass
@@ -431,8 +429,6 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
                 # Delete the "activation complete" message
                 if activation_msg:
                     try:
-                        from utils.limiter import global_rate_limiter
-                        await global_rate_limiter.consume()
                         await bot.delete_message(user_id, activation_msg.message_id)
                     except Exception:
                         pass
@@ -453,12 +449,9 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
             old_msg_id = _activation_progress_msgs.get(user_id)
             if old_msg_id:
                 try:
-                    from utils.limiter import global_rate_limiter
-                    await global_rate_limiter.consume()
                     await bot.delete_message(user_id, old_msg_id)
                 except Exception:
                     pass
-            
             # Send new progress counter (replaces previous)
             progress_msg = await _safe_send(bot, user_id,
                 f"📸 {new_total}/{activation_threshold} media received — {remaining} more to upload!",
@@ -495,8 +488,6 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
             old_msg_id = _activation_progress_msgs.get(user_id)
             if old_msg_id:
                 try:
-                    from utils.limiter import global_rate_limiter
-                    await global_rate_limiter.consume()
                     await bot.delete_message(user_id, old_msg_id)
                 except Exception:
                     pass
@@ -520,8 +511,6 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         old_msg_id = _activation_progress_msgs.pop(user_id, None)
         if old_msg_id:
             try:
-                from utils.limiter import global_rate_limiter
-                await global_rate_limiter.consume()
                 await bot.delete_message(user_id, old_msg_id)
             except Exception:
                 pass
@@ -532,7 +521,7 @@ async def handle_media(message: Message, pool: asyncpg.Pool, bot: Bot):
         # Brief auto-deleting confirmation — shows feedback then cleans itself
         try:
             from utils.limiter import global_rate_limiter
-            await global_rate_limiter.consume_for_user(user_id, priority=True)  # Rate-limit this send too
+            await global_rate_limiter.consume_for_user(user_id, priority=True)
             confirm = await bot.send_message(user_id, "📸 Received!", parse_mode="HTML")
             # Auto-delete after 3 seconds to keep chat clean
             asyncio.create_task(_auto_delete_message(bot, user_id, confirm.message_id, delay=3))
@@ -550,8 +539,6 @@ async def _auto_delete_message(bot: Bot, chat_id: int, message_id: int, delay: i
     """Delete a message after a short delay. Used for temporary confirmations."""
     try:
         await asyncio.sleep(delay)
-        from utils.limiter import global_rate_limiter
-        await global_rate_limiter.consume()
         await bot.delete_message(chat_id, message_id)
     except Exception:
         pass  # Message already deleted or chat unavailable

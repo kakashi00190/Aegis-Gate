@@ -903,32 +903,46 @@ async def admin_purge_user_media_confirm(callback: CallbackQuery, pool: asyncpg.
 
 @router.callback_query(F.data.startswith("admin_purge_user_media_do_"))
 async def admin_purge_user_media_do(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot):
-    """Execute user media purge."""
+    """Execute user media purge — runs in background to avoid blocking broadcasts."""
     if not is_admin(callback.from_user.id):
         return
 
     user_id = int(callback.data.replace("admin_purge_user_media_do_", ""))
 
-    await callback.answer("🗑 Purging media...")
+    await callback.answer("🗑 Purging media in background...")
 
-    progress_msg = await _show_loading(callback, "Purging user media")
+    progress_msg = await _show_loading(callback, "Purging user media (background)")
 
-    result = await purge_user_sent_messages(bot, pool, user_id)
+    # Run purge in background — don't block the handler/event loop
+    # This prevents starving broadcasts while thousands of delete_message calls run
+    admin_id = callback.from_user.id
+    async def _purge_and_notify():
+        try:
+            result = await purge_user_sent_messages(bot, pool, user_id)
+            done_text = (
+                f"✅ <b>Media Purged</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n\n"
+                f"🗑 Recipient chats: {result['chat_deleted']} deleted, {result['chat_skipped']} skipped\n"
+                f"📤 Uploader's original messages: {result.get('original_deleted', 0)} deleted\n"
+                f"📤 Queue items removed: <b>{result['queued_deleted']}</b>\n"
+                f"💾 DB media deleted: <b>{result['db_media_deleted']}</b>\n"
+                f"💾 DB sent_messages deleted: <b>{result['db_sent_deleted']}</b>"
+            )
+            try:
+                await progress_msg.edit_text(done_text, parse_mode="HTML", reply_markup=admin_main_keyboard())
+            except Exception:
+                # If progress_msg expired, send as new message
+                from utils.limiter import global_rate_limiter
+                await global_rate_limiter.consume_for_user(admin_id, priority=True)
+                await bot.send_message(admin_id, done_text, parse_mode="HTML", reply_markup=admin_main_keyboard())
+        except Exception as e:
+            logger.error(f"Purge background task error: {safe_error(e)}")
+            try:
+                await progress_msg.edit_text(f"❌ Purge failed: {safe_error(e)}", parse_mode="HTML")
+            except Exception:
+                pass
 
-    done_text = (
-        f"✅ <b>Media Purged</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"🗑 Recipient chats: {result['chat_deleted']} deleted, {result['chat_skipped']} skipped\n"
-        f"📤 Uploader's original messages: {result.get('original_deleted', 0)} deleted\n"
-        f"📤 Queue items removed: <b>{result['queued_deleted']}</b>\n"
-        f"💾 DB media deleted: <b>{result['db_media_deleted']}</b>\n"
-        f"💾 DB sent_messages deleted: <b>{result['db_sent_deleted']}</b>"
-    )
-
-    try:
-        await progress_msg.edit_text(done_text, parse_mode="HTML", reply_markup=admin_main_keyboard())
-    except Exception:
-        pass
+    asyncio.create_task(_purge_and_notify())
 
 
 @router.callback_query(F.data == "admin_media_control")
