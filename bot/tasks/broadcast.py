@@ -37,14 +37,14 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
 # --- Anti-violation traffic shaping ---
 # Media-type specific concurrency: heavy media gets fewer parallel sends
 MEDIA_CONCURRENCY = {
-    'photo': 3,
-    'video': 2,
-    'document': 2,
+    'photo': 5,
+    'video': 3,
+    'document': 3,
 }
 SEND_DELAY_BASE = 0.0        # Rate limiter handles all pacing — no extra delay needed
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 15              # Smaller chunks = fewer concurrent in-flight requests
+CHUNK_SIZE = 20              # Larger chunks = more parallel sends per batch
 
 # Broadcast entropy — varied caption formats to break fingerprint detection
 # Different patterns: emoji+name, name only, decorative, subtle, expressive
@@ -458,9 +458,9 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
 
             # Adaptive throughput: check backlog FIRST to set mode and warmup params
             # Normal (0-49 pending): 3/sec, cooldown every 10, 8-20s gaps
-            # High (50-199 pending): 4/sec, cooldown every 15, 5-15s gaps  
-            # Critical (200-1999 pending): 5/sec, cooldown every 25, 2-5s gaps
-            # Emergency (2000+ pending): 5/sec, cooldown every 30, 1-3s gaps
+            # High (50-199 pending): 5/sec, cooldown every 20, 3-8s gaps  
+            # Critical (200-1999 pending): 6/sec, cooldown every 40, 1-3s gaps
+            # Emergency (2000+ pending): 7/sec, cooldown every 50, 0.5-1.5s gaps
             try:
                 async with pool.acquire() as conn:
                     backlog_count = await conn.fetchval(
@@ -470,22 +470,22 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 backlog_count = 0
             
             if backlog_count >= BACKLOG_EMERGENCY_THRESHOLD:
-                effective_rate = 5
-                cooldown_n = 30
-                cooldown_dur = (20, 40)
-                gap_range = (1, 3)
+                effective_rate = 7
+                cooldown_n = 50
+                cooldown_dur = (15, 30)
+                gap_range = (0.5, 1.5)
                 mode = "EMERGENCY"
             elif backlog_count >= BACKLOG_CRITICAL_THRESHOLD:
-                effective_rate = 5
-                cooldown_n = 25
-                cooldown_dur = (25, 50)
-                gap_range = (2, 5)
+                effective_rate = 6
+                cooldown_n = 40
+                cooldown_dur = (20, 40)
+                gap_range = (1, 3)
                 mode = "CRITICAL"
             elif backlog_count >= BACKLOG_HIGH_THRESHOLD:
-                effective_rate = 4
-                cooldown_n = 15
-                cooldown_dur = (35, 75)
-                gap_range = (5, 15)
+                effective_rate = 5
+                cooldown_n = 20
+                cooldown_dur = (30, 60)
+                gap_range = (3, 8)
                 mode = "HIGH"
             else:
                 effective_rate = 3
@@ -539,7 +539,7 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                     logger.error(f"Startup unclaim error: {safe_error(e)}")
 
             # Adaptive claim limit: more items when backlog is large
-            claim_limit = 25 if backlog_count < BACKLOG_HIGH_THRESHOLD else (40 if backlog_count < BACKLOG_CRITICAL_THRESHOLD else 50)
+            claim_limit = 25 if backlog_count < BACKLOG_HIGH_THRESHOLD else (50 if backlog_count < BACKLOG_CRITICAL_THRESHOLD else 80)
             raw_items = await claim_due_broadcasts(pool, limit=claim_limit)
             if not raw_items:
                 # Periodic status log even if no items
@@ -588,20 +588,31 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
 
             grouped_media = {**album_groups, **batched_singles}
 
-            # Process broadcasts sequentially — one at a time.
-            # Concurrent broadcasts cause FloodWait avalanche (3 broadcasts
-            # fight for same 25 tokens/sec = 75 effective rate = instant flood).
-            for items in grouped_media.values():
+            # Process broadcasts — parallel in EMERGENCY/CRITICAL, sequential otherwise.
+            # Rate limiter handles global pacing — each broadcast_item uses consume_for_user
+            # which respects the rate cap. Parallel just means less idle time between sends.
+            parallel = 2 if mode in ("EMERGENCY", "CRITICAL") else 1
+            item_list = list(grouped_media.values())
+            
+            for batch_start in range(0, len(item_list), parallel):
+                batch_items = item_list[batch_start:batch_start + parallel]
+                
                 # Proactive cooldown: after N broadcasts, take a longer break
-                # This prevents the sustained-volume pattern that triggers violations
-                broadcasts_since_cooldown += 1
+                broadcasts_since_cooldown += len(batch_items)
                 if broadcasts_since_cooldown >= cooldown_n:
                     cooldown = random.uniform(*cooldown_dur)
                     logger.info(f"🧊 Proactive cooldown: {cooldown:.0f}s after {cooldown_n} broadcasts ({mode} mode)")
                     await asyncio.sleep(cooldown)
                     broadcasts_since_cooldown = 0
                 
-                await broadcast_item(bot, pool, items, recipients, default_semaphore)
+                if len(batch_items) == 1:
+                    await broadcast_item(bot, pool, batch_items[0], recipients, default_semaphore)
+                else:
+                    # Run N broadcasts in parallel — rate limiter paces them
+                    await asyncio.gather(*[
+                        broadcast_item(bot, pool, items, recipients, default_semaphore)
+                        for items in batch_items
+                    ], return_exceptions=True)
                 
                 # Anti-detection: random delay between items breaks rapid-fire pattern
                 await asyncio.sleep(random.uniform(*gap_range))

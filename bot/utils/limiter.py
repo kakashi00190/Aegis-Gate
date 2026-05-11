@@ -147,7 +147,7 @@ class TokenBucketLimiter:
         self._last_flood = 0.0
         # Per-user send tracking — prevents sending too fast to one user
         self._user_last_send: dict[int, float] = {}
-        self._user_min_interval = 0.8  # Min 0.8s between sends to same user (Telegram per-chat limit ~1/sec)
+        self._user_min_interval = 0.5  # Min 0.5s between sends to same user (Telegram per-chat limit ~1/sec)
 
     @property
     def slowdown(self) -> float:
@@ -245,6 +245,7 @@ class TokenBucketLimiter:
 
 # Telegram allows ~30 messages per second to different users (BURST)
 # Sustained 24/7 sending must be MUCH lower to avoid violations.
-# 15 → violated. 10 → violated. 5 → violated with send-back feature.
-# 3 is the safe sustained rate when broadcasts + send-backs + confirmations all share it.
+# 15 → violated. 10 → violated. 5 → violated (caused by lock contention + delete_message stealing tokens, now fixed).
+# 7 → testing with all fixes applied (lock-free sleep, priority tokens, delete separation).
+# 3 is the safe fallback for NORMAL mode.
 global_rate_limiter = TokenBucketLimiter(rate=3, capacity=6)  # capacity=2×rate for burst headroom
