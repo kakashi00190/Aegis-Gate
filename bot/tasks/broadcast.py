@@ -45,7 +45,6 @@ SEND_DELAY_BASE = 0.0        # Rate limiter handles all pacing — no extra dela
 BATCH_SIZE = 10
 MAX_RETRIES = 3
 CHUNK_SIZE = 15              # Smaller chunks = fewer concurrent in-flight requests
-MAX_RECIPIENTS_PER_ITEM = 60 # Anti-detection: limit recipients per item. 80 was too high.
 
 # Broadcast entropy — varied caption formats to break fingerprint detection
 # Different patterns: emoji+name, name only, decorative, subtle, expressive
@@ -350,13 +349,6 @@ async def broadcast_item(bot: Bot, pool: asyncpg.Pool, media_items: List[dict], 
         logger.info(f"No recipients for media from {uploader_name}. Re-queueing {len(m_ids)} items.")
         await unclaim_broadcast(pool, m_ids)
         return
-
-    # Anti-detection: limit recipients per item so not every media goes to ALL users
-    # This breaks the pattern of identical recipient lists across all broadcasts
-    if total_targets > MAX_RECIPIENTS_PER_ITEM:
-        random.shuffle(target_users)
-        target_users = target_users[:MAX_RECIPIENTS_PER_ITEM]
-        total_targets = len(target_users)
 
     # Shuffle recipients for organic delivery order — prevents identical send patterns
     random.shuffle(target_users)
