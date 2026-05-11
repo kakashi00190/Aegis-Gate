@@ -195,6 +195,27 @@ class TokenBucketLimiter:
             # Sleep OUTSIDE the lock — other tasks can proceed concurrently
             await asyncio.sleep(wait)
 
+    async def consume_bulk(self, count: int):
+        """Consume multiple tokens at once (for send_media_group accounting).
+        Instead of N sequential consume() calls (each waiting 0.2s = N×0.2s total),
+        this drains N tokens from the bucket in one wait cycle."""
+        self._recover_slowdown()
+        while True:
+            async with self.lock:
+                now = time.monotonic()
+                elapsed = now - self.last_update
+                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+                self.last_update = now
+                if self.tokens >= count:
+                    self.tokens -= count
+                    self.wait_count = 0
+                    return
+                # Not enough tokens — calculate how long to wait for all of them
+                deficit = count - self.tokens
+                wait = (deficit / self.rate) * self._slowdown * random.uniform(0.8, 1.3)
+            # Sleep OUTSIDE the lock
+            await asyncio.sleep(wait)
+
     async def consume_for_user(self, user_id: int):
         """Consume a token AND enforce per-user minimum interval.
         Use this for sends directed at a specific user (broadcasts, send-backs, etc).
