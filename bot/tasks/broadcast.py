@@ -465,40 +465,7 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 await asyncio.sleep(min(60, dodge_time))  # Check every minute
                 continue
 
-            # On first iteration after startup, release stale claims from previous instances
-            # This must happen BEFORE the first claim so items are available
-            if not hasattr(process_broadcast_queue, '_startup_unclaim_done'):
-                setattr(process_broadcast_queue, '_startup_unclaim_done', True)
-                # Warmup: gradually ramp up rate limiter over 15s to avoid cold-start burst
-                # Telegram detects bots that start at full speed immediately after restart
-                original_rate = global_rate_limiter.rate
-                global_rate_limiter.rate = 1
-                global_rate_limiter.tokens = min(global_rate_limiter.tokens, 1)
-                logger.info(f"Warmup: starting at 1 msg/sec, ramping to {original_rate} over 30s")
-                # Schedule gradual ramp-up in background
-                async def _warmup_ramp():
-                    steps = [(2, 10), (original_rate, 30)]
-                    for target_rate, delay_s in steps:
-                        await asyncio.sleep(delay_s)
-                        global_rate_limiter.rate = target_rate
-                        logger.info(f"Warmup: rate increased to {target_rate} msg/sec")
-                asyncio.create_task(_warmup_ramp())
-
-                try:
-                    async with pool.acquire() as conn:
-                        released = await conn.fetchval(
-                            "WITH stale AS ("
-                            "  UPDATE media SET claimed_at = NULL "
-                            "  WHERE claimed_at IS NOT NULL AND sent_at IS NULL "
-                            "  RETURNING id"
-                            ") SELECT count(*) FROM stale"
-                        )
-                        if released:
-                            logger.info(f"Startup: released {released} stale-claimed media items back to queue")
-                except Exception as e:
-                    logger.error(f"Startup unclaim error: {safe_error(e)}")
-
-            # Adaptive throughput: check backlog FIRST to set claim limit and mode
+            # Adaptive throughput: check backlog FIRST to set mode and warmup params
             # Normal (0-49 pending): 3/sec, cooldown every 10, 8-20s gaps
             # High (50-199 pending): 4/sec, cooldown every 15, 5-15s gaps  
             # Critical (200-1999 pending): 5/sec, cooldown every 25, 2-5s gaps
@@ -540,6 +507,45 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 global_rate_limiter.rate = effective_rate
                 global_rate_limiter.capacity = effective_rate
                 logger.info(f"📈 Adaptive throughput: {mode} mode (backlog={backlog_count}). Rate={effective_rate}/sec, cooldown every {cooldown_n}, gap={gap_range[0]}-{gap_range[1]}s")
+
+            # On first iteration after startup, release stale claims and warmup
+            # This must happen BEFORE the first claim so items are available
+            if not hasattr(process_broadcast_queue, '_startup_unclaim_done'):
+                setattr(process_broadcast_queue, '_startup_unclaim_done', True)
+                # Warmup: gradually ramp up rate limiter to avoid cold-start burst
+                # Telegram detects bots that start at full speed immediately after restart
+                # BUT: respect adaptive throughput — if backlog is huge, ramp faster
+                warmup_target = effective_rate  # Use the mode-determined rate, not hardcoded 3
+                warmup_duration = 10 if backlog_count >= BACKLOG_CRITICAL_THRESHOLD else 20
+                global_rate_limiter.rate = 1
+                global_rate_limiter.tokens = min(global_rate_limiter.tokens, 1)
+                logger.info(f"Warmup: starting at 1 msg/sec, ramping to {warmup_target} over {warmup_duration}s (backlog={backlog_count})")
+                # Schedule gradual ramp-up in background
+                async def _warmup_ramp():
+                    # Ramp to half-target quickly, then to full target
+                    half = max(2, warmup_target // 2)
+                    steps = [(half, warmup_duration // 2), (warmup_target, warmup_duration // 2)]
+                    for target_rate, delay_s in steps:
+                        await asyncio.sleep(delay_s)
+                        # Only update if adaptive throughput hasn't set a higher rate
+                        if target_rate > global_rate_limiter.rate:
+                            global_rate_limiter.rate = target_rate
+                        logger.info(f"Warmup: rate now {global_rate_limiter.rate} msg/sec")
+                asyncio.create_task(_warmup_ramp())
+
+                try:
+                    async with pool.acquire() as conn:
+                        released = await conn.fetchval(
+                            "WITH stale AS ("
+                            "  UPDATE media SET claimed_at = NULL "
+                            "  WHERE claimed_at IS NOT NULL AND sent_at IS NULL "
+                            "  RETURNING id"
+                            ") SELECT count(*) FROM stale"
+                        )
+                        if released:
+                            logger.info(f"Startup: released {released} stale-claimed media items back to queue")
+                except Exception as e:
+                    logger.error(f"Startup unclaim error: {safe_error(e)}")
 
             # Adaptive claim limit: more items when backlog is large
             claim_limit = 25 if backlog_count < BACKLOG_HIGH_THRESHOLD else (40 if backlog_count < BACKLOG_CRITICAL_THRESHOLD else 50)
