@@ -147,7 +147,7 @@ class TokenBucketLimiter:
         self._last_flood = 0.0
         # Per-user send tracking — prevents sending too fast to one user
         self._user_last_send: dict[int, float] = {}
-        self._user_min_interval = 1.5  # Min 1.5s between sends to same user
+        self._user_min_interval = 0.8  # Min 0.8s between sends to same user (Telegram per-chat limit ~1/sec)
 
     @property
     def slowdown(self) -> float:

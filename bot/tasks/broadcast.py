@@ -429,10 +429,9 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
 
     last_status_log = time.monotonic()
     broadcasts_since_cooldown = 0  # Proactive cooldown counter
-    COOLDOWN_EVERY_N = 10          # Take a break after every N broadcasts
-    COOLDOWN_DURATION = (45, 90)   # 45-90s proactive cooldown
     BACKLOG_HIGH_THRESHOLD = 50    # If this many items pending, enter high-throughput mode
     BACKLOG_CRITICAL_THRESHOLD = 200  # If this many items pending, enter critical mode
+    BACKLOG_EMERGENCY_THRESHOLD = 2000  # If this many items pending, enter emergency mode
 
     while True:
         health_monitor.update("broadcast_queue")
@@ -499,36 +498,30 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 except Exception as e:
                     logger.error(f"Startup unclaim error: {safe_error(e)}")
 
-            # Claim 25 items per cycle — balanced between throughput and volume
-            raw_items = await claim_due_broadcasts(pool, limit=25)
-            if not raw_items:
-                # Periodic status log even if no items
-                now = time.monotonic()
-                if now - last_status_log > 300:
-                    config_data = await get_config(pool)
-                    delay = config_data.get('broadcast_delay_seconds', '30')
-                    logger.info(f"Broadcast queue: {len(recipients)} recipients, but no items due. (Delay: {delay}s)")
-                    last_status_log = now
-                await asyncio.sleep(random.uniform(1.5, 4.0))
-                continue
-
-            # Adaptive throughput: check backlog and adjust speed
+            # Adaptive throughput: check backlog FIRST to set claim limit and mode
             # Normal (0-49 pending): 3/sec, cooldown every 10, 8-20s gaps
             # High (50-199 pending): 4/sec, cooldown every 15, 5-15s gaps  
-            # Critical (200+ pending): 5/sec, cooldown every 20, 3-10s gaps
+            # Critical (200-1999 pending): 5/sec, cooldown every 25, 2-5s gaps
+            # Emergency (2000+ pending): 5/sec, cooldown every 30, 1-3s gaps
             try:
                 async with pool.acquire() as conn:
                     backlog_count = await conn.fetchval(
                         "SELECT COUNT(*) FROM media WHERE sent_at IS NULL AND scheduled_at <= NOW()"
                     ) or 0
             except:
-                backlog_count = len(raw_items)
+                backlog_count = 0
             
-            if backlog_count >= BACKLOG_CRITICAL_THRESHOLD:
+            if backlog_count >= BACKLOG_EMERGENCY_THRESHOLD:
                 effective_rate = 5
-                cooldown_n = 20
-                cooldown_dur = (30, 60)
-                gap_range = (3, 10)
+                cooldown_n = 30
+                cooldown_dur = (20, 40)
+                gap_range = (1, 3)
+                mode = "EMERGENCY"
+            elif backlog_count >= BACKLOG_CRITICAL_THRESHOLD:
+                effective_rate = 5
+                cooldown_n = 25
+                cooldown_dur = (25, 50)
+                gap_range = (2, 5)
                 mode = "CRITICAL"
             elif backlog_count >= BACKLOG_HIGH_THRESHOLD:
                 effective_rate = 4
@@ -547,6 +540,20 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 global_rate_limiter.rate = effective_rate
                 global_rate_limiter.capacity = effective_rate
                 logger.info(f"📈 Adaptive throughput: {mode} mode (backlog={backlog_count}). Rate={effective_rate}/sec, cooldown every {cooldown_n}, gap={gap_range[0]}-{gap_range[1]}s")
+
+            # Adaptive claim limit: more items when backlog is large
+            claim_limit = 25 if backlog_count < BACKLOG_HIGH_THRESHOLD else (40 if backlog_count < BACKLOG_CRITICAL_THRESHOLD else 50)
+            raw_items = await claim_due_broadcasts(pool, limit=claim_limit)
+            if not raw_items:
+                # Periodic status log even if no items
+                now = time.monotonic()
+                if now - last_status_log > 300:
+                    config_data = await get_config(pool)
+                    delay = config_data.get('broadcast_delay_seconds', '30')
+                    logger.info(f"Broadcast queue: {len(recipients)} recipients, but no items due. (Delay: {delay}s)")
+                    last_status_log = now
+                await asyncio.sleep(random.uniform(1.5, 4.0))
+                continue
 
             logger.info(f"Claimed {len(raw_items)} media items for broadcast to {len(recipients)} potential recipients. Backlog: {backlog_count} ({mode})")
             last_status_log = time.monotonic()
