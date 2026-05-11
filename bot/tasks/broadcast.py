@@ -208,14 +208,11 @@ async def send_media_to_user(
                     elif m_type == 'document':
                         media_group.append(InputMediaDocument(media=f_id, caption=cap))
 
-                # CRITICAL: send_media_group sends N items as N separate Telegram messages
-                # but is only 1 API call. We account for the message volume by consuming
-                # N tokens, but do it as a single bulk consume to avoid serial 0.2s waits.
-                # (N sequential consume() calls = 0.2s × N = 1.8s per user for 10-item album)
-                extra_tokens = len(media_items) - 1  # -1 because _send_with_semaphore already consumed 1
-                if extra_tokens > 0:
-                    await global_rate_limiter.consume_bulk(extra_tokens)
-                
+                # send_media_group is 1 API call even though it delivers N messages.
+                # Charge 1 token (already consumed by _send_with_semaphore).
+                # Per-chat flood protection is handled by consume_for_user's 0.8s interval.
+                # Global rate limit is on API calls, not messages within a call.
+
                 messages = await bot.send_media_group(user_id, media_group)
                 if messages and session_id:
                     for i, msg in enumerate(messages):
