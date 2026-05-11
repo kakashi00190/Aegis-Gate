@@ -44,7 +44,7 @@ MEDIA_CONCURRENCY = {
 SEND_DELAY_BASE = 0.0        # Rate limiter handles all pacing — no extra delay needed
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 20              # Larger chunks = more parallel sends per batch
+CHUNK_SIZE = 15              # Concurrent sends per batch — balance throughput vs lock contention
 
 # Broadcast entropy — varied caption formats to break fingerprint detection
 # Different patterns: emoji+name, name only, decorative, subtle, expressive
@@ -588,31 +588,20 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
 
             grouped_media = {**album_groups, **batched_singles}
 
-            # Process broadcasts — parallel in EMERGENCY/CRITICAL, sequential otherwise.
-            # Rate limiter handles global pacing — each broadcast_item uses consume_for_user
-            # which respects the rate cap. Parallel just means less idle time between sends.
-            parallel = 2 if mode in ("EMERGENCY", "CRITICAL") else 1
-            item_list = list(grouped_media.values())
-            
-            for batch_start in range(0, len(item_list), parallel):
-                batch_items = item_list[batch_start:batch_start + parallel]
-                
+            # Process broadcasts sequentially — one at a time.
+            # The rate limiter caps global throughput (7/sec in EMERGENCY).
+            # Parallel broadcasts don't increase throughput — they just increase
+            # lock contention, starving handlers (8-18s delays observed).
+            for items in grouped_media.values():
                 # Proactive cooldown: after N broadcasts, take a longer break
-                broadcasts_since_cooldown += len(batch_items)
+                broadcasts_since_cooldown += 1
                 if broadcasts_since_cooldown >= cooldown_n:
                     cooldown = random.uniform(*cooldown_dur)
                     logger.info(f"🧊 Proactive cooldown: {cooldown:.0f}s after {cooldown_n} broadcasts ({mode} mode)")
                     await asyncio.sleep(cooldown)
                     broadcasts_since_cooldown = 0
                 
-                if len(batch_items) == 1:
-                    await broadcast_item(bot, pool, batch_items[0], recipients, default_semaphore)
-                else:
-                    # Run N broadcasts in parallel — rate limiter paces them
-                    await asyncio.gather(*[
-                        broadcast_item(bot, pool, items, recipients, default_semaphore)
-                        for items in batch_items
-                    ], return_exceptions=True)
+                await broadcast_item(bot, pool, items, recipients, default_semaphore)
                 
                 # Anti-detection: random delay between items breaks rapid-fire pattern
                 await asyncio.sleep(random.uniform(*gap_range))
