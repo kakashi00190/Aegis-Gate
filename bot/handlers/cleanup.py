@@ -218,6 +218,7 @@ async def cleanup_callback(callback: CallbackQuery, pool: asyncpg.Pool, bot: Bot
                 pass
         
         # Now clean up the sent_messages records
+        db_deleted = 0
         if messages_to_delete:
             db_deleted = await delete_user_duplicate_messages(pool, user_id, messages_to_delete)
             logger.info(f"Cleanup DB: removed {db_deleted} sent_messages records for user {user_id}")

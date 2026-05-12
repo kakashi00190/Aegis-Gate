@@ -7,6 +7,7 @@ import asyncpg
 from datetime import datetime, timedelta
 
 from aiohttp import web
+import json
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -33,9 +34,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-import json
-from aiohttp import web, WSCloseCode
 
 from utils.health import TaskHealth
 
@@ -98,11 +96,16 @@ async def stats_ws_handler(request):
     
     return ws
 
+# Module-level reference to the health server app so we can update pool later
+_health_app = None
+
 async def run_health_server(pool, port=None):
+    global _health_app
     if port is None:
         port = int(os.environ.get("PORT", 8080))
     app = web.Application()
     app['pool'] = pool
+    _health_app = app
     app.router.add_get("/", health_handler) # Handle root for Render's default health check
     app.router.add_get("/api/healthz", health_handler)
     app.router.add_get("/healthz", health_handler)
@@ -160,8 +163,8 @@ async def run_health_server(pool, port=None):
 async def main():
     # 1. Start Health Server IMMEDIATELY (Render requires this)
     port = int(os.environ.get("PORT", 8080))
-    # We need a dummy pool for health server before real pool is ready
-    loop = asyncio.get_event_loop()
+    # Start with pool=None; we update app['pool'] once real pool is ready
+    loop = asyncio.get_running_loop()
     loop.create_task(run_health_server(None, port))
     
     # 2. Wait for potential old instances to shut down on Render
@@ -192,9 +195,13 @@ async def main():
     )
     logger.info("Database pool created.")
 
-    # Now that we have the pool, let's start a real health server
-    # It will override the dummy one on the same port
-    loop.create_task(run_health_server(pool, port))
+    # Update the health server's pool reference now that we have a real pool
+    # This avoids starting a second server on the same port (which would fail)
+    if _health_app is not None:
+        _health_app['pool'] = pool
+        logger.info("Health server pool updated with real database connection.")
+    else:
+        logger.warning("Health app not initialized yet — pool update deferred.")
 
     # Run DB init BEFORE starting the bot tasks
     # This ensures migrations are done before any queries run

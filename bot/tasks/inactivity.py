@@ -19,6 +19,7 @@ async def check_inactivity(bot: Bot, pool: asyncpg.Pool):
         try:
             paused, _ = await is_session_paused(pool)
             if paused:
+                await asyncio.sleep(900)  # Sleep before continue to prevent infinite tight loop
                 continue
 
             config = await get_config(pool)

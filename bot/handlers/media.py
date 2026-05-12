@@ -199,20 +199,25 @@ _activation_prompt_sent: set = set()
 
 def _cleanup_cooldowns(cooldowns: dict, ttl: int = COOLDOWN_TTL):
     now = time.time()
-    if isinstance(next(iter(cooldowns.values()), None), list):
+    sample = next(iter(cooldowns.values()), None)
+    if isinstance(sample, list):
         # Handle _upload_cooldowns list format
-        expired_keys = []
+        # Build new dict to avoid mutating during iteration
+        updated = {}
         for k, v in cooldowns.items():
-            cooldowns[k] = [v_ts for v_ts in v if now - v_ts < WINDOW_SECONDS]
-            if not cooldowns[k]:
-                expired_keys.append(k)
-        for k in expired_keys:
-            del cooldowns[k]
+            filtered = [v_ts for v_ts in v if now - v_ts < WINDOW_SECONDS]
+            if filtered:
+                updated[k] = filtered
+        cooldowns.clear()
+        cooldowns.update(updated)
     else:
         # Handle _pause_cooldowns float format
         expired = [k for k, v in cooldowns.items() if now - v > ttl]
         for k in expired:
             del cooldowns[k]
+    # Also clean up _activation_prompt_sent to prevent unbounded growth
+    if len(_activation_prompt_sent) > 1000:
+        _activation_prompt_sent.clear()
 
 
 async def _send_media_back_to_uploader(bot: Bot, user_id: int, file_id: str, media_type: str, uploader_name: str):

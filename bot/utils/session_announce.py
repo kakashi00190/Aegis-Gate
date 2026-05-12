@@ -97,6 +97,7 @@ async def broadcast_new_session_started(bot: Bot, pool: asyncpg.Pool, new_sessio
             continue
 
         try:
+            from utils.limiter import global_rate_limiter
             await global_rate_limiter.consume_for_user(user['id'])
             await bot.send_message(user['id'], text, parse_mode="HTML")
         except TelegramForbiddenError:

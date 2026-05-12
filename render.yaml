@@ -2,8 +2,8 @@ services:
   - type: worker
     name: aegis-gate-bot
     runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m bot.main
+    buildCommand: pip install -r bot/requirements.txt
+    startCommand: python bot/main.py
     envVars:
       - key: BOT_TOKEN
         sync: false

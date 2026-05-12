@@ -561,7 +561,7 @@ async def add_media(
                 else:
                     scheduled_at = base_time
 
-                return await conn.fetchrow(
+                result = await conn.fetchrow(
                     """INSERT INTO media 
                        (user_id, session_id, file_id, file_unique_id, media_type, scheduled_at, media_group_id,
                         original_chat_id, original_message_id) 
@@ -569,11 +569,11 @@ async def add_media(
                     user_id, session_id, file_id, file_unique_id, media_type, scheduled_at, media_group_id,
                     original_chat_id, original_message_id
                 )
+                invalidate_stats_cache()
+                return result
     except Exception as e:
         logger.error(f"Error adding media for {user_id}: {safe_error(e)}")
         return None
-    else:
-        invalidate_stats_cache()
 
 
 async def update_user_on_upload(
@@ -596,7 +596,7 @@ async def update_user_on_upload(
                         exp = exp + $2,
                         level = GREATEST(1, (
                             SELECT MAX(l) FROM generate_series(1, 200) AS l
-                            WHERE 200.0 * l * power(1.4, l) <= (users.exp + $2)
+                            WHERE ROUND(200.0 * l * power(1.4, l) / 100.0) * 100 <= (users.exp + $2)
                         )),
                         total_media_lifetime = total_media_lifetime + 1,
                         session_upload_count = session_upload_count + 1,
@@ -615,6 +615,7 @@ async def update_user_on_upload(
                 new_level = int(updated['level'])
                 old_level = int(updated['old_level'])
 
+                invalidate_stats_cache()
                 return {
                     'user': updated,
                     'level_up': new_level > old_level,
@@ -626,8 +627,6 @@ async def update_user_on_upload(
     except Exception as e:
         logger.error(f"Error updating user {user_id} on upload: {safe_error(e)}")
         return {}
-    else:
-        invalidate_stats_cache()
 
 
 async def activate_user(pool: asyncpg.Pool, user_id: int) -> bool:
@@ -639,12 +638,12 @@ async def activate_user(pool: asyncpg.Pool, user_id: int) -> bool:
                     "WHERE id = $1 AND status = 'pending' RETURNING id",
                     user_id
                 )
+                if result:
+                    invalidate_stats_cache()
                 return bool(result)
     except Exception as e:
         logger.error(f"Error activating user {user_id}: {safe_error(e)}")
         return False
-    else:
-        invalidate_stats_cache()
 
 
 async def get_missed_media_for_user(pool: asyncpg.Pool, user_id: int, limit: int = 50) -> List[asyncpg.Record]:
@@ -680,12 +679,12 @@ async def reactivate_user(pool: asyncpg.Pool, user_id: int) -> bool:
                     "last_activity_at = NOW() WHERE id = $1 AND status = 'inactive' RETURNING id",
                     user_id
                 )
+                if result:
+                    invalidate_stats_cache()
                 return bool(result)
     except Exception as e:
         logger.error(f"Error reactivating user {user_id}: {safe_error(e)}")
         return False
-    else:
-        invalidate_stats_cache()
 
 
 async def increment_inactive_uploads(pool: asyncpg.Pool, user_id: int) -> int:
@@ -710,10 +709,9 @@ async def mark_user_blocked(pool: asyncpg.Pool, user_id: int):
                     "UPDATE users SET bot_blocked = TRUE WHERE id = $1",
                     user_id
                 )
+                invalidate_stats_cache()
     except Exception as e:
         logger.error(f"Error marking user {user_id} as blocked: {safe_error(e)}")
-    else:
-        invalidate_stats_cache()
 
 
 async def mark_user_unblocked(pool: asyncpg.Pool, user_id: int):
@@ -724,10 +722,9 @@ async def mark_user_unblocked(pool: asyncpg.Pool, user_id: int):
                     "UPDATE users SET bot_blocked = FALSE WHERE id = $1",
                     user_id
                 )
+                invalidate_stats_cache()
     except Exception as e:
         logger.error(f"Error marking user {user_id} as unblocked: {safe_error(e)}")
-    else:
-        invalidate_stats_cache()
 
 
 async def reset_all_blocked_status(pool: asyncpg.Pool) -> int:
@@ -735,12 +732,13 @@ async def reset_all_blocked_status(pool: asyncpg.Pool) -> int:
         async with asyncio.timeout(10):
             async with pool.acquire() as conn:
                 result = await conn.execute("UPDATE users SET bot_blocked = FALSE WHERE status != 'banned'")
-                return int(result.split()[-1]) if result else 0
+                count = int(result.split()[-1]) if result else 0
+                if count > 0:
+                    invalidate_stats_cache()
+                return count
     except Exception as e:
         logger.error(f"Error resetting blocked status: {safe_error(e)}")
         return 0
-    else:
-        invalidate_stats_cache()
 
 
 async def set_user_opted_out(pool: asyncpg.Pool, user_id: int, opted_out: bool) -> bool:
@@ -751,12 +749,13 @@ async def set_user_opted_out(pool: asyncpg.Pool, user_id: int, opted_out: bool) 
                     "UPDATE users SET opted_out = $2 WHERE id = $1",
                     user_id, opted_out
                 )
-                return result.endswith("1")
+                success = result.endswith("1")
+                if success:
+                    invalidate_stats_cache()
+                return success
     except Exception as e:
         logger.error(f"Error setting opted_out for {user_id}: {safe_error(e)}")
         return False
-    else:
-        invalidate_stats_cache()
 
 
 async def set_referral_code(pool: asyncpg.Pool, user_id: int, code: str) -> bool:
@@ -1243,10 +1242,9 @@ async def mark_media_sent(pool: asyncpg.Pool, media_ids: List[int]):
                     "UPDATE media SET sent_at = NOW(), claimed_at = NULL WHERE id = ANY($1)",
                     media_ids
                 )
+                invalidate_stats_cache()
     except Exception as e:
         logger.error(f"Error marking media as sent {media_ids}: {safe_error(e)}")
-    else:
-        invalidate_stats_cache()
 
 
 async def unclaim_broadcast(pool: asyncpg.Pool, media_ids: List[int], delay_seconds: int = 30):
@@ -1261,10 +1259,9 @@ async def unclaim_broadcast(pool: asyncpg.Pool, media_ids: List[int], delay_seco
                        WHERE id = ANY($2)""",
                     delay_seconds, media_ids
                 )
+                invalidate_stats_cache()
     except Exception as e:
         logger.error(f"Error unclaiming media {media_ids}: {safe_error(e)}")
-    else:
-        invalidate_stats_cache()
 
 
 async def get_inactive_users(pool: asyncpg.Pool, cutoff: datetime) -> List[asyncpg.Record]:
