@@ -1167,7 +1167,11 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
                 # First, find IDs of media items that are due
                 # Using SKIP LOCKED to avoid waiting for other workers
                 # Interleave: take oldest items (drain backlog) + newest items (deliver fresh uploads fast)
-                # Two separate queries to avoid UNION+FOR UPDATE and CTE syntax issues
+                # Interleave: take a balanced mix of oldest (drain backlog) and newest (fast delivery for fresh uploads)
+                # We use a 70/30 split to favor backlog clearance while keeping new uploads snappy
+                oldest_limit = int(limit * 0.7)
+                newest_limit = limit - oldest_limit
+
                 oldest = await conn.fetch(
                     """SELECT id, media_group_id FROM media
                        WHERE scheduled_at <= NOW()
@@ -1176,8 +1180,20 @@ async def claim_due_broadcasts(pool: asyncpg.Pool, limit: int = 50) -> List[asyn
                        ORDER BY scheduled_at ASC
                        LIMIT $1
                        FOR UPDATE SKIP LOCKED""",
-                    limit
+                    oldest_limit
                 )
+                newest = await conn.fetch(
+                    """SELECT id, media_group_id FROM media
+                       WHERE scheduled_at <= NOW()
+                         AND sent_at IS NULL
+                         AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')
+                         AND id NOT IN (SELECT id FROM media WHERE claimed_at IS NOT NULL AND claimed_at > NOW() - INTERVAL '2 minutes')
+                       ORDER BY scheduled_at DESC
+                       LIMIT $1
+                       FOR UPDATE SKIP LOCKED""",
+                    newest_limit
+                )
+
                 newest = await conn.fetch(
                     """SELECT id, media_group_id FROM media
                        WHERE scheduled_at <= NOW()

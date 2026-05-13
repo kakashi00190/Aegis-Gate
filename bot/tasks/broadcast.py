@@ -37,14 +37,19 @@ async def _local_store_sent_messages_batch(pool: asyncpg.Pool, batch: List[tuple
 # --- Anti-violation traffic shaping ---
 # Media-type specific concurrency: heavy media gets fewer parallel sends
 MEDIA_CONCURRENCY = {
-    'photo': 5,
-    'video': 3,
-    'document': 3,
+    'photo': 8,
+    'video': 5,
+    'document': 5,
 }
 SEND_DELAY_BASE = 0.0        # Rate limiter handles all pacing — no extra delay needed
 BATCH_SIZE = 10
 MAX_RETRIES = 3
-CHUNK_SIZE = 15              # Concurrent sends per batch — balance throughput vs lock contention
+CHUNK_SIZE = 20              # Concurrent sends per batch — balance throughput vs lock contention
+
+def get_human_delay(base: float, variance: float = 0.2) -> float:
+    """Return a delay using a Gaussian distribution to mimic human timing"""
+    # Variance is the standard deviation relative to base
+    return max(0.01, random.gauss(base, base * variance))
 
 # Broadcast entropy — varied caption formats to break fingerprint detection
 # Different patterns: emoji+name, name only, decorative, subtle, expressive
@@ -455,7 +460,7 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 logger.warning(f"🛡️ Ban wave dodge active. Pausing broadcasts for {dodge_time:.0f}s")
                 await asyncio.sleep(min(60, dodge_time))  # Check every minute
                 continue
-
+            
             # Adaptive throughput: check backlog FIRST to set mode and warmup params
             # Normal (0-49 pending): 3/sec, cooldown every 10, 8-20s gaps
             # High (50-199 pending): 5/sec, cooldown every 20, 3-8s gaps  
@@ -470,34 +475,43 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 backlog_count = 0
             
             if backlog_count >= BACKLOG_EMERGENCY_THRESHOLD:
-                effective_rate = 7
-                cooldown_n = 50
-                cooldown_dur = (15, 30)
-                gap_range = (0.5, 1.5)
+                effective_rate = 10
+                cooldown_n = 60
+                cooldown_dur = (20, 40)
+                gap_range = (0.7, 1.7)
                 mode = "EMERGENCY"
             elif backlog_count >= BACKLOG_CRITICAL_THRESHOLD:
-                effective_rate = 6
-                cooldown_n = 40
-                cooldown_dur = (20, 40)
-                gap_range = (1, 3)
+                effective_rate = 8
+                cooldown_n = 50
+                cooldown_dur = (25, 45)
+                gap_range = (1.2, 3.2)
                 mode = "CRITICAL"
             elif backlog_count >= BACKLOG_HIGH_THRESHOLD:
-                effective_rate = 5
-                cooldown_n = 20
-                cooldown_dur = (30, 60)
-                gap_range = (3, 8)
+                effective_rate = 6
+                cooldown_n = 30
+                cooldown_dur = (35, 65)
+                gap_range = (3.5, 8.5)
                 mode = "HIGH"
             else:
-                effective_rate = 3
-                cooldown_n = 10
-                cooldown_dur = (45, 90)
-                gap_range = (8, 20)
+                effective_rate = 4
+                cooldown_n = 15
+                cooldown_dur = (50, 100)
+                gap_range = (8.5, 20.5)
                 mode = "NORMAL"
             
-            if global_rate_limiter.rate != effective_rate:
-                global_rate_limiter.rate = effective_rate
-                global_rate_limiter.capacity = effective_rate * 2  # 2× rate for burst headroom
-                logger.info(f"📈 Adaptive throughput: {mode} mode (backlog={backlog_count}). Rate={effective_rate}/sec, capacity={effective_rate*2}, cooldown every {cooldown_n}, gap={gap_range[0]}-{gap_range[1]}s")
+            # Apply Recovery Mode Throttling
+            recovery_multiplier = 1.0
+            if ban_wave_detector.is_in_recovery():
+                recovery_multiplier = 0.4 # Reduce rate to 40% during recovery
+                mode = f"{mode}_RECOVERY"
+            
+            final_rate = effective_rate * recovery_multiplier
+            
+            if global_rate_limiter.rate != final_rate:
+                global_rate_limiter.rate = final_rate
+                global_rate_limiter.capacity = final_rate * 2  # 2× rate for burst headroom
+                logger.info(f"📈 Adaptive throughput: {mode} mode (backlog={backlog_count}). Rate={final_rate:.1f}/sec, capacity={final_rate*2:.1f}, cooldown every {cooldown_n}, gap={gap_range[0]}-{gap_range[1]}s")
+
 
             # On first iteration after startup, release stale claims and warmup
             # This must happen BEFORE the first claim so items are available
@@ -603,8 +617,16 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 
                 await broadcast_item(bot, pool, items, recipients, default_semaphore)
                 
+                # Human-like "Rest" Period: Occasionally take a long break to break automation patterns
+                if random.random() < 0.005: # 0.5% chance per broadcast
+                    rest_dur = random.uniform(120, 600) # 2-10 min break
+                    logger.info(f"💤 Human-like rest: pausing for {rest_dur:.0f}s to mimic human activity")
+                    await asyncio.sleep(rest_dur)
+                
                 # Anti-detection: random delay between items breaks rapid-fire pattern
-                await asyncio.sleep(random.uniform(*gap_range))
+                # Use Gaussian distribution for more natural pacing
+                gap = random.uniform(*gap_range)
+                await asyncio.sleep(get_human_delay(gap))
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {safe_error(e)}")

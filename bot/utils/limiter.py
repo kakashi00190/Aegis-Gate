@@ -6,71 +6,89 @@ import logging
 logger = logging.getLogger(__name__)
 
 class BanWaveDetector:
-    """Detects Telegram ban waves from FloodWait patterns and triggers auto-dodge"""
+    """Detects Telegram ban waves from FloodWait patterns and triggers tiered auto-dodge"""
     
     def __init__(self):
-        self.floodwait_times = []  # Recent FloodWait timestamps
-        self.floodwait_durations = []  # Recent FloodWait durations
+        self.floodwait_history = []  # List of (timestamp, duration)
         self.ban_wave_detected = False
         self.dodge_until = None  # When dodge period ends
-        self.detection_window = 60  # seconds to analyze
-        self.detection_threshold = 3  # FloodWaits in window to trigger
-        self.high_duration_threshold = 30  # Any FloodWait > 30s is suspicious
+        self.recovery_until = None  # When recovery period ends
+        self.detection_window = 300  # seconds to analyze (5 mins)
         self._bot = None  # Bot instance for notifications (set at startup)
+        
+        # Scoring thresholds
+        self.SCORE_MODERATE = 10
+        self.SCORE_SEVERE = 30
     
     def set_bot(self, bot):
         """Set the bot instance for admin notifications"""
         self._bot = bot
     
-    def record_floodwait(self, duration: float):
-        """Record a FloodWait occurrence and check for ban wave"""
-        now = time.monotonic()
-        self.floodwait_times.append(now)
-        self.floodwait_durations.append(duration)
-        
-        # Keep only recent data (prune both lists together)
+    def _calculate_score(self, now: float) -> float:
+        """Calculate current violation score based on recent FloodWaits"""
         cutoff = now - self.detection_window
-        recent_indices = [i for i, t in enumerate(self.floodwait_times) if t > cutoff]
-        self.floodwait_times = [self.floodwait_times[i] for i in recent_indices]
-        self.floodwait_durations = [self.floodwait_durations[i] for i in recent_indices]
+        # Prune old history
+        self.floodwait_history = [item for item in self.floodwait_history if item[0] > cutoff]
         
-        # Check for ban wave patterns
-        recent_count = len(self.floodwait_times)
-        has_long_wait = any(d > self.high_duration_threshold for d in self.floodwait_durations)
+        score = 0.0
+        for _, duration in self.floodwait_history:
+            if duration < 10:
+                score += 1
+            elif duration < 60:
+                score += 3
+            elif duration < 3600:
+                score += 10
+            else:
+                score += 30
+        return score
+
+    def record_floodwait(self, duration: float):
+        """Record a FloodWait occurrence and check for ban wave severity"""
+        now = time.monotonic()
+        self.floodwait_history.append((now, duration))
         
-        if recent_count >= self.detection_threshold or has_long_wait:
-            if not self.ban_wave_detected:
-                self.ban_wave_detected = True
-                self.dodge_until = now + random.uniform(300, 600)  # 5-10 min dodge
-                dodge_duration = self.dodge_until - now
-                
-                # Log to system
-                logger.warning(f"🛡️ BAN WAVE DETECTED! {recent_count} FloodWaits in {self.detection_window}s. Dodging for {dodge_duration:.0f}s")
-                
-                # Schedule admin notification (async, don't block)
-                asyncio.create_task(self._notify_admin_ban_wave(recent_count, dodge_duration))
-                return True
+        score = self._calculate_score(now)
+        
+        if score >= self.SCORE_SEVERE:
+            severity = "SEVERE"
+            dodge_sec = random.uniform(3600, 14400)  # 1-4 hours
+        elif score >= self.SCORE_MODERATE:
+            severity = "MODERATE"
+            dodge_sec = random.uniform(900, 1800)    # 15-30 mins
+        else:
+            return False # Not enough score to trigger dodge
+
+        if not self.ban_wave_detected:
+            self.ban_wave_detected = True
+            self.dodge_until = now + dodge_sec
+            
+            logger.warning(f"🛡️ {severity} BAN WAVE DETECTED! Score: {score:.1f}. Dodging for {dodge_sec:.0f}s")
+            asyncio.create_task(self._notify_admin_ban_wave(score, dodge_sec, severity))
+            return True
         return False
     
-    async def _notify_admin_ban_wave(self, flood_count: int, dodge_duration: float):
+    async def _notify_admin_ban_wave(self, score: float, duration: float, severity: str):
         """Send admin-only notification about ban wave detection"""
         try:
             from config import ADMIN_IDS
+            from datetime import datetime, timezone
             
             if not self._bot:
-                logger.error("BanWaveDetector: no bot instance set for notifications")
                 return
+            
+            resume_time = datetime.now(timezone.utc).timestamp() + duration
+            resume_str = datetime.fromtimestamp(resume_time, timezone.utc).strftime('%H:%M:%S UTC')
             
             for admin_id in ADMIN_IDS:
                 try:
                     await self._bot.send_message(
                         admin_id,
-                        f"🚨 <b>BAN WAVE DETECTED</b>\n\n"
-                        f"• {flood_count} FloodWaits in 60s\n"
-                        f"• Auto-dodge activated\n"
-                        f"• Pausing broadcasts for {dodge_duration:.0f}s (~{dodge_duration/60:.1f}min)\n"
-                        f"• Bot will resume automatically\n\n"
-                        f"This prevents potential ban. Monitor logs.",
+                        f"🚨 <b>BAN WAVE DETECTED ({severity})</b>\n\n"
+                        f"• Violation Score: {score:.1f}\n"
+                        f"• Action: Auto-dodge activated\n"
+                        f"• Duration: {duration/60:.1f} min\n"
+                        f"• Estimated Resume: <code>{resume_str}</code>\n\n"
+                        f"Bot is pausing all broadcasts to prevent a permanent ban.",
                         parse_mode="HTML"
                     )
                 except Exception as e:
@@ -80,39 +98,40 @@ class BanWaveDetector:
     
     def should_dodge(self) -> bool:
         """Check if we should pause broadcasts due to ban wave"""
+        now = time.monotonic()
         if self.ban_wave_detected and self.dodge_until:
-            if time.monotonic() < self.dodge_until:
+            if now < self.dodge_until:
                 return True
             else:
-                # Dodge period over, reset
+                # Dodge period over, enter recovery mode
                 self.ban_wave_detected = False
+                self.recovery_until = now + random.uniform(1800, 3600) # 30-60m recovery
                 self.dodge_until = None
-                self.floodwait_times = []
-                self.floodwait_durations = []
-                logger.info("🛡️ Ban wave subsided. Resuming normal operations.")
-                
-                # Notify admin that ban wave is over
+                logger.info(f"🛡️ Ban wave dodge ended. Entering recovery mode until {self.recovery_until - now:.0f}s from now.")
                 asyncio.create_task(self._notify_admin_recovery())
+        return False
+
+    def is_in_recovery(self) -> bool:
+        """Check if bot is in post-dodge recovery mode (cautionary phase)"""
+        if self.recovery_until:
+            return time.monotonic() < self.recovery_until
         return False
     
     async def _notify_admin_recovery(self):
         """Send admin-only notification when ban wave subsides"""
         try:
             from config import ADMIN_IDS
-            
             if not self._bot:
-                logger.error("BanWaveDetector: no bot instance set for notifications")
                 return
-            
             for admin_id in ADMIN_IDS:
                 try:
                     await self._bot.send_message(
                         admin_id,
                         f"✅ <b>BAN WAVE SUBSIDED</b>\n\n"
                         f"• Auto-dodge completed\n"
-                        f"• Resuming normal broadcasts\n"
+                        f"• Now in <b>Recovery Mode</b> (Cautionary pacing)\n"
                         f"• Monitoring for new patterns\n\n"
-                        f"Bot is operating normally again.",
+                        f"Bot is gradually resuming operations.",
                         parse_mode="HTML"
                     )
                 except Exception as e:
@@ -123,12 +142,12 @@ class BanWaveDetector:
     def get_status(self) -> dict:
         """Get current detector status for monitoring"""
         now = time.monotonic()
-        recent_count = len([t for t in self.floodwait_times if t > now - self.detection_window])
         return {
             'ban_wave_detected': self.ban_wave_detected,
             'dodge_remaining': max(0, (self.dodge_until or now) - now) if self.dodge_until else 0,
-            'recent_floodwaits': recent_count,
-            'detection_threshold': self.detection_threshold
+            'recovery_active': self.is_in_recovery(),
+            'current_score': self._calculate_score(now),
+            'detection_window': self.detection_window
         }
 
 # Global ban wave detector
