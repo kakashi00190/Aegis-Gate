@@ -174,14 +174,10 @@ class TokenBucketLimiter:
 
     def apply_flood_pressure(self):
         """Called when FloodWait/429 is received — dynamically increase slowdown.
-        Cooldown: only increase once per 10s to prevent concurrent FloodWait
-        errors from stacking exponentially (1.3x → 1.69x → 2.2x → 3.71x)."""
+        Uses gentle 1.15x multiplier (no cooldown) so every FloodWait compounds
+        safely: 1.15^5 = 2.01x vs old 1.3^5 = 3.71x. Capped at 5.0x."""
         now = time.monotonic()
-        if now - self._last_flood < 10:
-            # Already applied pressure recently — just update timestamp
-            self._last_flood = now
-            return
-        self._slowdown = min(self._slowdown * 1.3, 5.0)
+        self._slowdown = min(self._slowdown * 1.15, 5.0)
         self._last_flood = now
         logger.warning(f"Dynamic slowdown increased to {self._slowdown:.2f}x due to flood pressure")
 

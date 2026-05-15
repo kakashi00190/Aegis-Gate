@@ -462,10 +462,11 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 continue
             
             # Adaptive throughput: check backlog FIRST to set mode and warmup params
-            # Normal (0-49 pending): 3/sec, cooldown every 10, 8-20s gaps
-            # High (50-199 pending): 5/sec, cooldown every 20, 3-8s gaps  
-            # Critical (200-1999 pending): 6/sec, cooldown every 40, 1-3s gaps
-            # Emergency (2000+ pending): 7/sec, cooldown every 50, 0.5-1.5s gaps
+            # Normal (0-49 pending): 3/sec, cooldown every 20, 5-12s gaps
+            # High (50-199 pending): 4/sec, cooldown every 30, 3-8s gaps
+            # Critical (200-1999 pending): 5/sec, cooldown every 40, 1-4s gaps
+            # Emergency (2000+ pending): 5/sec, cooldown every 50, 0.5-2s gaps
+            # All modes capped at 5/sec — historical data shows 5+ causes violations
             try:
                 async with pool.acquire() as conn:
                     backlog_count = await conn.fetchval(
@@ -475,28 +476,28 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
                 backlog_count = 0
             
             if backlog_count >= BACKLOG_EMERGENCY_THRESHOLD:
-                effective_rate = 10
-                cooldown_n = 60
+                effective_rate = 5
+                cooldown_n = 50
                 cooldown_dur = (20, 40)
-                gap_range = (0.7, 1.7)
+                gap_range = (0.5, 2.0)
                 mode = "EMERGENCY"
             elif backlog_count >= BACKLOG_CRITICAL_THRESHOLD:
-                effective_rate = 8
-                cooldown_n = 50
+                effective_rate = 5
+                cooldown_n = 40
                 cooldown_dur = (25, 45)
-                gap_range = (1.2, 3.2)
+                gap_range = (1.0, 4.0)
                 mode = "CRITICAL"
             elif backlog_count >= BACKLOG_HIGH_THRESHOLD:
-                effective_rate = 6
+                effective_rate = 4
                 cooldown_n = 30
                 cooldown_dur = (35, 65)
-                gap_range = (3.5, 8.5)
+                gap_range = (3.0, 8.0)
                 mode = "HIGH"
             else:
-                effective_rate = 4
-                cooldown_n = 15
+                effective_rate = 3
+                cooldown_n = 20
                 cooldown_dur = (50, 100)
-                gap_range = (8.5, 20.5)
+                gap_range = (5.0, 12.0)
                 mode = "NORMAL"
             
             # Apply Recovery Mode Throttling
@@ -594,39 +595,49 @@ async def process_broadcast_queue(bot: Bot, pool: asyncpg.Pool):
             batched_singles = {}
             for uid, items in singles_by_uploader.items():
                 # Telegram allows max 10 items per send_media_group
-                # Use 3 max to avoid burst patterns that trigger FloodWait
-                for i in range(0, len(items), 3):
-                    batch = items[i:i+3]
+                # Use 5 max — safe within Telegram limits, 40% fewer API calls than 3
+                for i in range(0, len(items), 5):
+                    batch = items[i:i+5]
                     batch_key = f"batch_{uid}_{i}"
                     batched_singles[batch_key] = batch
 
             grouped_media = {**album_groups, **batched_singles}
 
-            # Process broadcasts sequentially — one at a time.
-            # The rate limiter caps global throughput (7/sec in EMERGENCY).
-            # Parallel broadcasts don't increase throughput — they just increase
-            # lock contention, starving handlers (8-18s delays observed).
+            # Process broadcasts with 2 concurrent workers via bounded queue.
+            # Rate limiter caps global throughput at configured rate (3-5/sec).
+            # Two workers allow items to interleave — while one broadcast_item
+            # waits on rate limiter, the other can process its chunk.
+            async def _broadcast_worker(queue, worker_id):
+                while True:
+                    items = await queue.get()
+                    if items is None:  # Sentinel — shutdown signal
+                        break
+                    try:
+                        await broadcast_item(bot, pool, items, recipients, default_semaphore)
+                    except Exception as e:
+                        logger.error(f"Worker {worker_id} broadcast error: {safe_error(e)}")
+                    finally:
+                        queue.task_done()
+                    # Gap after each item completes (rate limiter handles pacing during item)
+                    gap = random.uniform(*gap_range)
+                    await asyncio.sleep(get_human_delay(gap))
+
+            queue = asyncio.Queue(maxsize=2)
+            workers = [asyncio.create_task(_broadcast_worker(queue, i)) for i in range(2)]
+
             for items in grouped_media.values():
-                # Proactive cooldown: after N broadcasts, take a longer break
                 broadcasts_since_cooldown += 1
                 if broadcasts_since_cooldown >= cooldown_n:
                     cooldown = random.uniform(*cooldown_dur)
                     logger.info(f"🧊 Proactive cooldown: {cooldown:.0f}s after {cooldown_n} broadcasts ({mode} mode)")
                     await asyncio.sleep(cooldown)
                     broadcasts_since_cooldown = 0
-                
-                await broadcast_item(bot, pool, items, recipients, default_semaphore)
-                
-                # Human-like "Rest" Period: Occasionally take a long break to break automation patterns
-                if random.random() < 0.005: # 0.5% chance per broadcast
-                    rest_dur = random.uniform(120, 600) # 2-10 min break
-                    logger.info(f"💤 Human-like rest: pausing for {rest_dur:.0f}s to mimic human activity")
-                    await asyncio.sleep(rest_dur)
-                
-                # Anti-detection: random delay between items breaks rapid-fire pattern
-                # Use Gaussian distribution for more natural pacing
-                gap = random.uniform(*gap_range)
-                await asyncio.sleep(get_human_delay(gap))
+                await queue.put(items)  # Blocks if 2 items already processing
+
+            await queue.join()
+            for _ in range(2):
+                await queue.put(None)  # Sentinel to stop workers
+            await asyncio.gather(*workers)
 
         except Exception as e:
             logger.error(f"Broadcast queue error: {safe_error(e)}")

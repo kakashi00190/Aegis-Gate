@@ -153,12 +153,16 @@ async def _deliver_missed_media(bot: Bot, pool: asyncpg.Pool, user_id: int):
 
 async def _safe_answer(message: Message, text: str, **kwargs):
     """Send a message.answer() with TelegramRetryAfter handling."""
+    from utils.limiter import global_rate_limiter, ban_wave_detector
     try:
+        await global_rate_limiter.consume_for_user(message.chat.id, priority=True)
         await message.answer(text, **kwargs)
     except TelegramRetryAfter as e:
+        ban_wave_detector.record_floodwait(e.retry_after)
         logger.warning(f"Flood control on handler reply, waiting {e.retry_after}s")
         await asyncio.sleep(e.retry_after)
         try:
+            await global_rate_limiter.consume_for_user(message.chat.id, priority=True)
             await message.answer(text, **kwargs)
         except Exception:
             pass
@@ -169,11 +173,12 @@ async def _safe_answer(message: Message, text: str, **kwargs):
 async def _safe_send(bot: Bot, chat_id: int, text: str, **kwargs):
     """Send a bot.send_message() with TelegramRetryAfter handling. Returns the Message object.
     Uses global rate limiter with per-user interval to prevent violation."""
-    from utils.limiter import global_rate_limiter
+    from utils.limiter import global_rate_limiter, ban_wave_detector
     try:
         await global_rate_limiter.consume_for_user(chat_id, priority=True)
         return await bot.send_message(chat_id, text, **kwargs)
     except TelegramRetryAfter as e:
+        ban_wave_detector.record_floodwait(e.retry_after)
         logger.warning(f"Flood control on bot send, waiting {e.retry_after}s")
         await asyncio.sleep(e.retry_after)
         try:
