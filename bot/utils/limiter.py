@@ -208,7 +208,7 @@ class TokenBucketLimiter:
                 # Not enough tokens — calculate wait time UNDER lock, then sleep OUTSIDE
                 self.wait_count += 1
                 if self.wait_count == 50 or (self.wait_count > 50 and self.wait_count % 200 == 0):
-                    logger.warning(f"Rate limiter pacing ({self.wait_count} waits, slowdown={self._slowdown:.2f}x). Staying below {self.rate} req/sec.")
+                    logger.debug(f"Rate limiter pacing ({self.wait_count} waits, slowdown={self._slowdown:.2f}x). Staying below {self.rate} req/sec.")
                 base_wait = 1 / self.rate
                 wait = base_wait * self._slowdown * random.uniform(0.8, 1.3)
             # Sleep OUTSIDE the lock — other tasks can proceed concurrently

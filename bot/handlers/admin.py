@@ -1231,67 +1231,75 @@ async def admin_announce_confirmed(callback: CallbackQuery, state: FSMContext, p
         parse_mode="HTML"
     )
 
-    sent = 0
-    failed = 0
-    blocked = 0
-    pinned = 0
-    last_update = -1
+    # Parallel broadcast with 3 concurrent workers (matches broadcast queue pattern)
+    WORKERS = 3
+    sem = asyncio.Semaphore(WORKERS)
+    lock = asyncio.Lock()
+    counts = {'sent': 0, 'failed': 0, 'blocked': 0, 'pinned': 0, 'completed': 0}
+    last_update = [-1]
 
-    for i, user in enumerate(users, 1):
-        # Rate limiting with per-user interval
-        await global_rate_limiter.consume_for_user(user['id'])
-
-        try:
-            copied = await bot.copy_message(
-                chat_id=user['id'],
-                from_chat_id=chat_id,
-                message_id=msg_id
-            )
-            sent += 1
-            if pin_message:
-                try:
-                    from utils.limiter import global_rate_limiter
-                    await global_rate_limiter.consume()
-                    await bot.pin_chat_message(
-                        chat_id=user['id'],
-                        message_id=copied.message_id,
-                        disable_notification=False
-                    )
-                    pinned += 1
-                except Exception as pin_err:
-                    logger.debug(f"Pin failed for {user['id']}: {pin_err}")
-        except TelegramForbiddenError as e:
-            logger.info(f"Broadcast: User {user['id']} blocked the bot (403). Marking as blocked.")
-            await mark_user_blocked(pool, user['id'])
-            blocked += 1
-        except Exception as e:
-            err = str(e).lower()
-            # Only mark as blocked for very specific Telegram errors that mean the chat is gone
-            if any(x in err for x in ['chat not found', 'user_deactivated']):
-                logger.info(f"Broadcast: User {user['id']} unavailable ({err}). Marking as blocked.")
-                await mark_user_blocked(pool, user['id'])
-                blocked += 1
-            else:
-                logger.error(f"Broadcast: Failed to send to {user['id']}: {e}")
-                failed += 1
-
-        # Jittered delay
-        await asyncio.sleep(0.02 * random.uniform(0.8, 1.2))
-
-        pct = int(i / total_users * 100)
-        if pct > last_update or i == total_users:
-            last_update = pct
-            bar = generate_progress_bar(pct)
+    async def _send_one(user):
+        async with sem:
+            # Use global consume() instead of consume_for_user() — each user gets
+            # exactly one message, so per-user interval tracking is pure overhead
+            await global_rate_limiter.consume()
+            result = 'sent'
             try:
-                await status_msg.edit_text(
-                    f"📢 <b>Broadcasting{pin_label}...</b>\n\n"
-                    f"⏳ Progress: {i}/{total_users} ({pct}%)\n"
-                    f"<code>{bar}</code>\n\n"
-                    f"✅ Sent: {sent} | 🚫 Blocked: {blocked} | ❌ Failed: {failed}",
-                    parse_mode="HTML"
+                copied = await bot.copy_message(
+                    chat_id=user['id'],
+                    from_chat_id=chat_id,
+                    message_id=msg_id
                 )
-            except TelegramBadRequest:
-                pass
+                if pin_message:
+                    try:
+                        await global_rate_limiter.consume()
+                        await bot.pin_chat_message(
+                            chat_id=user['id'],
+                            message_id=copied.message_id,
+                            disable_notification=False
+                        )
+                        async with lock:
+                            counts['pinned'] += 1
+                    except Exception as pin_err:
+                        logger.debug(f"Pin failed for {user['id']}: {pin_err}")
+            except TelegramForbiddenError:
+                result = 'blocked'
+                logger.info(f"Broadcast: User {user['id']} blocked the bot (403). Marking as blocked.")
+                await mark_user_blocked(pool, user['id'])
+            except Exception as e:
+                err = str(e).lower()
+                if any(x in err for x in ['chat not found', 'user_deactivated']):
+                    result = 'blocked'
+                    logger.info(f"Broadcast: User {user['id']} unavailable ({err}). Marking as blocked.")
+                    await mark_user_blocked(pool, user['id'])
+                else:
+                    result = 'failed'
+                    logger.error(f"Broadcast: Failed to send to {user['id']}: {e}")
+
+            async with lock:
+                counts[result] += 1
+                counts['completed'] += 1
+                pct = int(counts['completed'] / total_users * 100)
+                if pct > last_update[0] or counts['completed'] == total_users:
+                    last_update[0] = pct
+                    bar = generate_progress_bar(pct)
+                    try:
+                        await status_msg.edit_text(
+                            f"📢 <b>Broadcasting{pin_label}...</b>\n\n"
+                            f"⏳ Progress: {counts['completed']}/{total_users} ({pct}%)\n"
+                            f"<code>{bar}</code>\n\n"
+                            f"✅ Sent: {counts['sent']} | 🚫 Blocked: {counts['blocked']} | ❌ Failed: {counts['failed']}",
+                            parse_mode="HTML"
+                        )
+                    except TelegramBadRequest:
+                        pass
+
+    await asyncio.gather(*[_send_one(u) for u in users])
+
+    sent = counts['sent']
+    failed = counts['failed']
+    blocked = counts['blocked']
+    pinned = counts['pinned']
 
     try:
         await status_msg.delete()
