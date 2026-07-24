@@ -824,14 +824,17 @@ async def get_invite_key(pool: asyncpg.Pool) -> str:
 
 
 async def get_user_duplicate_media(pool: asyncpg.Pool, user_id: int) -> List[asyncpg.Record]:
-    """Find duplicate media sent to a user based on file_unique_id.
-    Uses sent_messages to find per-user duplicates with message_ids for deletion."""
+    """Find duplicate media sent to a user.
+    Detects two kinds of duplicates:
+      1. Same file_unique_id (identical file sent multiple times via different media rows)
+      2. Same media_id appearing multiple times in sent_messages (re-broadcast or send-back + broadcast)
+    Returns groups ordered by most duplicates first."""
     try:
         async with asyncio.timeout(15):
             async with pool.acquire() as conn:
                 return await conn.fetch("""
                     WITH user_sends AS (
-                        SELECT 
+                        SELECT
                             sm.id as sm_id,
                             sm.message_id,
                             sm.media_id,
@@ -845,9 +848,10 @@ async def get_user_duplicate_media(pool: asyncpg.Pool, user_id: int) -> List[asy
                         WHERE sm.recipient_id = $1
                         AND m.file_unique_id IS NOT NULL
                     ),
-                    dup_groups AS (
-                        SELECT 
-                            file_unique_id,
+                    -- Dedup by file_unique_id (same file, different rows)
+                    dup_by_file AS (
+                        SELECT
+                            file_unique_id as dedup_key,
                             COUNT(*) as count,
                             MIN(sm_id) as keep_sm_id,
                             ARRAY_AGG(message_id ORDER BY sm_id ASC) as message_ids,
@@ -859,11 +863,39 @@ async def get_user_duplicate_media(pool: asyncpg.Pool, user_id: int) -> List[asy
                         FROM user_sends
                         GROUP BY file_unique_id
                         HAVING COUNT(*) > 1
+                    ),
+                    -- Dedup by media_id (same DB row sent multiple times, e.g. broadcast + send-back)
+                    dup_by_media_id AS (
+                        SELECT
+                            CAST(sm.media_id AS TEXT) as dedup_key,
+                            COUNT(*) as count,
+                            MIN(sm.id) as keep_sm_id,
+                            ARRAY_AGG(sm.message_id ORDER BY sm.id ASC) as message_ids,
+                            ARRAY_AGG(sm.id ORDER BY sm.id ASC) as sm_ids,
+                            MIN(m.created_at) as first_sent,
+                            MAX(m.created_at) as last_sent,
+                            MIN(m.media_type) as media_type,
+                            MIN(m.user_id) as uploader_id
+                        FROM sent_messages sm
+                        JOIN media m ON sm.media_id = m.id
+                        WHERE sm.recipient_id = $1
+                          AND sm.media_id IS NOT NULL
+                        GROUP BY sm.media_id
+                        HAVING COUNT(*) > 1
+                    ),
+                    -- Union both, pick whichever finds more duplicates per key
+                    combined AS (
+                        SELECT * FROM dup_by_file
+                        UNION
+                        SELECT * FROM dup_by_media_id
+                        WHERE dedup_key NOT IN (
+                            SELECT file_unique_id FROM dup_by_file
+                        )
                     )
-                    SELECT 
+                    SELECT
                         d.*,
                         u.anonymous_name
-                    FROM dup_groups d
+                    FROM combined d
                     LEFT JOIN users u ON u.id = d.uploader_id
                     ORDER BY d.count DESC, d.last_sent DESC
                 """, user_id)

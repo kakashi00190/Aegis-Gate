@@ -43,7 +43,7 @@ TERMS_TEXT = (
     "By using this bot, you agree to the following:\n\n"
     "• Content you upload <b>will be shared with other active users</b> automatically\n"
     "• You may <b>receive content from other users</b> automatically\n"
-    "• Some content may be sensitive or inappropriate\n"
+    "• 🛡️ <b>Active Moderation</b>: All uploaded media is actively scanned and monitored. Uploading illegal or prohibited content will result in an immediate, permanent ban.\n"
     "• You are responsible for anything you upload — <b>no harmful material</b>\n\n"
     "Controls available to you:\n"
     "• /stop — Stop receiving content at any time\n"

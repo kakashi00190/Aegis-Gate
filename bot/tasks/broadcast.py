@@ -51,45 +51,12 @@ def get_human_delay(base: float, variance: float = 0.2) -> float:
     # Variance is the standard deviation relative to base
     return max(0.01, random.gauss(base, base * variance))
 
-# Broadcast entropy — varied caption formats to break fingerprint detection
-# Different patterns: emoji+name, name only, decorative, subtle, expressive
-_ENTROPY_PHRASES = [
-    "🔥", "⚡", "📢", "✨", "🎬", "📸", "🎥", "🌟",
-    "💫", "🎯", "🪄", "🌙", "🦊", "🐺", "🦅", "🐉",
-    "💎", "🎪", "🦋", "🌺", "🍀", "🫧", "🧊", "🪩",
-    "🪬", "🝔", "⛧", "🜏", "☽", "⚝", "✵",
-    "🜿", "◈", "⍟", "⊛", "⎈", "⏣", "⎔", "⍙",
-]
-
-# Caption format templates — randomly selected per send
-# This prevents all messages having identical structure
-_CAPTION_FORMATS = [
-    "{emoji} {name}",              # 🔥 UserName
-    "{name}",                       # UserName (no emoji)
-    "by {name}",                    # by UserName
-    "{emoji} {name} {emoji2}",     # 🔥 UserName ⚡
-    "— {name}",                     # — UserName
-    "{name} ✦",                     # UserName ✦
-    "📸 by {name}",                 # 📸 by UserName
-    "{emoji2} {name} {emoji}",     # ⚡ UserName 🔥 (reversed)
-    "~ {name} ~",                   # ~ UserName ~
-    "{name} {emoji2}",              # UserName 🌙
-    "via {name}",                   # via UserName
-    "✧ {name} ✧",                   # ✧ UserName ✧
-    "{emoji} {emoji2} {name}",     # 🔥 ⚡ UserName
-    "{name} · {emoji}",            # UserName · 🔥
-    "from {name}",                  # from UserName
-    "⟡ {name}",                     # ⟡ UserName
-    "{emoji} {name}'s",            # 🔥 UserName's
-    "「{name}」",                    # 「UserName」
-    "{name} ⊹ {emoji2}",           # UserName ⊹ 🌟
-    "⌇ {name} {emoji}",            # ⌇ UserName 🔥
-]
+# Captions have been standardized for safety and compliance.
 
 # Duplicate send protection: tracks (user_id, media_id) recently sent
 # Prevents resend loops, accidental rebroadcast, duplicate scheduling bugs
 _recent_sends: dict[tuple[int, int], float] = {}  # (user_id, media_id) -> monotonic timestamp
-_RECENT_SENDS_TTL = 300  # 5 minutes
+_RECENT_SENDS_TTL = 1800  # 30 minutes — long enough to survive a bot restart re-claim cycle
 
 def _check_duplicate_send(user_id: int, media_id: int) -> bool:
     """Return True if this (user_id, media_id) was sent recently (duplicate)."""
@@ -100,7 +67,7 @@ def _check_duplicate_send(user_id: int, media_id: int) -> bool:
         return True  # duplicate
     _recent_sends[key] = now
     # Periodic cleanup
-    if len(_recent_sends) > 50000:
+    if len(_recent_sends) > 100000:
         expired = [k for k, v in _recent_sends.items() if now - v > _RECENT_SENDS_TTL]
         for k in expired:
             del _recent_sends[k]
@@ -146,7 +113,10 @@ async def sent_messages_logger_task(pool: asyncpg.Pool):
             # Flush batch if it's large enough or enough time has passed
             now = time.monotonic()
             if batch and (len(batch) >= 100 or now - last_flush >= 2.0):
-                await _local_store_sent_messages_batch(pool, batch)
+                # Filter out sentinel rows (session_id=-1) used by send-back tracking
+                real_batch = [row for row in batch if row[2] != -1]
+                if real_batch:
+                    await _local_store_sent_messages_batch(pool, real_batch)
                 batch = []
                 last_flush = now
                 
@@ -187,12 +157,9 @@ async def send_media_to_user(
             logger.debug(f"Duplicate send skipped: user={user_id} media={item['id']}")
             return True  # treat as success to avoid retry
 
-    # Build uploader credit caption — varied format per send to avoid repetitive patterns
+    # Build uploader credit caption
     if uploader_name and uploader_name != '?':
-        fmt = random.choice(_CAPTION_FORMATS)
-        emoji = random.choice(_ENTROPY_PHRASES)
-        emoji2 = random.choice(_ENTROPY_PHRASES)
-        credit = fmt.format(emoji=emoji, emoji2=emoji2, name=uploader_name)
+        credit = f"📨 {uploader_name} just added new media to the community!"
     else:
         credit = None
 

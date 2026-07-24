@@ -26,6 +26,7 @@ from utils.helpers import safe_error
 from utils.callback_guard import is_callback_spam
 from tasks.session import check_session_end
 from tasks.cleanup import cleanup_stale_verifications_task, cleanup_48hr_media_task
+from utils.redis_client import redis_ping as check_redis
 
 logging.basicConfig(
     level=logging.INFO,
@@ -208,6 +209,13 @@ async def main():
     logger.info("Starting database initialization...")
     await init_db(pool)
     logger.info("Database initialization complete.")
+
+    # Check Redis connectivity
+    redis_ok = await check_redis()
+    if redis_ok:
+        logger.info("✅ Upstash Redis is connected and healthy.")
+    else:
+        logger.warning("⚠️ Upstash Redis is NOT connected. Bot will run using Supabase only.")
 
     bot = Bot(
         token=config.BOT_TOKEN,

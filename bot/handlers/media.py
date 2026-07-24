@@ -125,12 +125,7 @@ async def _deliver_missed_media(bot: Bot, pool: asyncpg.Pool, user_id: int):
                 media_type = item.get('media_type', 'photo')
                 file_id = item['file_id']
                 uploader_name = item.get('anonymous_name', '?')
-                import random as _r
-                from tasks.broadcast import _ENTROPY_PHRASES, _CAPTION_FORMATS
-                fmt = _r.choice(_CAPTION_FORMATS)
-                emoji = _r.choice(_ENTROPY_PHRASES)
-                emoji2 = _r.choice(_ENTROPY_PHRASES)
-                credit = fmt.format(emoji=emoji, emoji2=emoji2, name=uploader_name) if uploader_name and uploader_name != '?' else None
+                credit = f"📨 {uploader_name} just added new media to the community!" if uploader_name and uploader_name != '?' else None
                 if media_type == 'photo':
                     await bot.send_photo(user_id, file_id, caption=credit)
                 elif media_type == 'video':
@@ -138,7 +133,7 @@ async def _deliver_missed_media(bot: Bot, pool: asyncpg.Pool, user_id: int):
                 elif media_type == 'document':
                     await bot.send_document(user_id, file_id, caption=credit)
                 # Small delay between missed media sends to avoid burst
-                await asyncio.sleep(_r.uniform(0.3, 0.8))
+                await asyncio.sleep(0.5)
             except Exception as e:
                 err = str(e).lower()
                 if 'blocked' in err or 'deactivated' in err or 'not found' in err:
@@ -228,26 +223,31 @@ def _cleanup_cooldowns(cooldowns: dict, ttl: int = COOLDOWN_TTL):
 async def _send_media_back_to_uploader(bot: Bot, user_id: int, file_id: str, media_type: str, uploader_name: str):
     """Send a media item back to the uploader with credit caption, so their chat shows it as 'received'.
     Uses global rate limiter to prevent violation."""
-    import random as _r
-    from tasks.broadcast import _ENTROPY_PHRASES, _CAPTION_FORMATS
     from utils.limiter import global_rate_limiter
     
     if uploader_name and uploader_name != '?':
-        fmt = _r.choice(_CAPTION_FORMATS)
-        emoji = _r.choice(_ENTROPY_PHRASES)
-        emoji2 = _r.choice(_ENTROPY_PHRASES)
-        credit = fmt.format(emoji=emoji, emoji2=emoji2, name=uploader_name)
+        credit = f"📨 {uploader_name} just added new media to the community!"
     else:
         credit = None
     
     try:
         await global_rate_limiter.consume_for_user(user_id, priority=True)  # Respect global + per-user rate limit
+        msg = None
         if media_type == 'photo':
-            await bot.send_photo(user_id, file_id, caption=credit)
+            msg = await bot.send_photo(user_id, file_id, caption=credit)
         elif media_type == 'video':
-            await bot.send_video(user_id, file_id, caption=credit)
+            msg = await bot.send_video(user_id, file_id, caption=credit)
         elif media_type == 'document':
-            await bot.send_document(user_id, file_id, caption=credit)
+            msg = await bot.send_document(user_id, file_id, caption=credit)
+        # Track this send-back in sent_messages so auto-cleanup can detect duplicates
+        if msg:
+            from tasks.broadcast import _sent_messages_queue
+            try:
+                # We don't have session_id or media_id here; use -1 as sentinel
+                # The important thing is the (recipient_id, message_id) pair for cleanup
+                _sent_messages_queue.put_nowait((user_id, msg.message_id, -1, None))
+            except Exception:
+                pass
     except Exception as e:
         err = str(e).lower()
         if 'blocked' in err or 'deactivated' in err:
@@ -555,13 +555,15 @@ async def _auto_delete_message(bot: Bot, chat_id: int, message_id: int, delay: i
 
 
 async def _get_user_activation_media(pool: asyncpg.Pool, user_id: int, session_id: int) -> list:
-    """Get all media items uploaded by a user during their activation (first session uploads)."""
+    """Get all media items uploaded by a user during activation, deduplicated by file_unique_id."""
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                """SELECT file_id, media_type FROM media 
-                   WHERE user_id = $1 AND session_id = $2 
-                   ORDER BY created_at ASC""",
+                """SELECT DISTINCT ON (COALESCE(file_unique_id, file_id))
+                       file_id, media_type, file_unique_id
+                   FROM media
+                   WHERE user_id = $1 AND session_id = $2
+                   ORDER BY COALESCE(file_unique_id, file_id), created_at ASC""",
                 user_id, session_id
             )
             return [dict(r) for r in rows]

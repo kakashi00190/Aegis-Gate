@@ -267,7 +267,7 @@ async def auto_cleanup_duplicates_task(bot: Bot, pool: asyncpg.Pool):
     
     # Track per-user last cleanup time to avoid re-scanning too frequently
     _last_cleanup: dict[int, float] = {}
-    _MIN_RESCAN_INTERVAL = 3600  # Don't re-scan same user within 1 hour
+    _MIN_RESCAN_INTERVAL = 600  # Re-scan users every 10 min max (was 1h — too slow for active bots)
     
     while True:
         cycle_start = time.time()
@@ -324,7 +324,7 @@ async def auto_cleanup_duplicates_task(bot: Bot, pool: asyncpg.Pool):
                     for msg_id in messages_to_delete:
                         try:
                             from utils.limiter import global_rate_limiter
-                            await global_rate_limiter.consume()
+                            await global_rate_limiter.consume_for_user(user_id)  # Per-user spacing prevents delete floods
                             await bot.delete_message(user_id, msg_id)
                             deleted_count += 1
                         except TelegramBadRequest:
@@ -334,7 +334,7 @@ async def auto_cleanup_duplicates_task(bot: Bot, pool: asyncpg.Pool):
                             break  # Bot blocked by user, stop trying
                         except Exception:
                             pass
-                        await asyncio.sleep(random.uniform(0.25, 0.4))
+                        await asyncio.sleep(random.uniform(0.1, 0.25))  # Small jitter on top of per-user limiter
                     
                     # Clean up sent_messages DB records
                     if messages_to_delete:
